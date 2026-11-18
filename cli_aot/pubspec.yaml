@@ -1,0 +1,10 @@
+name: orbat_cli
+description: ORBAT CLI - standalone AOT binary
+publish_to: none
+version: 0.2.0
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  image: ^4.13.1

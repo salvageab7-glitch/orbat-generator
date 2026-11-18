@@ -1,0 +1,24 @@
+# Dart / Flutter
+.dart_tool/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+
+# Flutter Windows 构建时生成的临时目录（含本机路径，勿提交）
+windows/flutter/ephemeral/
+
+# 开发期本地测试脚本与数据（不随仓库分发）
+test/
+*.log
+orbat-logs/
+orbat-snapshots/
+orbat-render-*/
+usage.jsonl
+browser-*.log
+
+# IDE
+.idea/
+.vscode/
+*.iml

@@ -1,0 +1,23 @@
+name: orbat_core
+description: ORBAT 编制图生成器 —— Windows / Android 双端
+publish_to: none
+version: 0.2.0+2
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # 文件选择 / 保存对话框（Windows + Android 均支持）
+  file_picker: ^8.1.7
+  # 纯 Dart 图片处理：大图缩放与切片（跨端可用，不依赖原生库）
+  image: ^4.13.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
