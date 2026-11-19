@@ -14,6 +14,16 @@
 **给外部 Agent 用 `orbat-cli.exe`**。它是 AOT 编译的原生程序（约 9MB），
 启动快、不弹窗、不依赖 Dart SDK。二者命令完全相同。
 
+## 模式三（外部 Agent）
+
+如果你是这个软件的"外部 Agent"（用自己的模型读图），先读这两份之一：
+
+- 中文模型（DeepSeek / Kimi / 豆包 / Qwen-VL）：`docs/MODE3-AGENT-QUICKSTART.zh.md`
+- English-speaking models (GPT / Claude / Gemini): `docs/MODE3-AGENT-QUICKSTART.en.md`
+
+它们覆盖：提示词获取、大图切块参数、JSON 契约、SIDC 速查、校验与修复回路、交付清单。
+一句话版本：`prompts --type tile` 取规则 → 你写 JSON → `validate` → `render`；**不要用 `generate`**（那是模式一/二）。
+
 ## 前置条件（重要：分发给别人时）
 
 `orbat-cli.exe` 本身不依赖 Dart，但**出图**（`render` / `batch` / `generate --render`）依赖外部环境：

@@ -50,6 +50,7 @@ app/
 - 红牌校验 + 补丁式修复（不重写整棵树，避免丢节点）
 - 调用线上渲染器出 PNG/SVG，产物落在 `软件目录\输出文件存档\`
 - 界面支持中英切换；树视图可就地改名称/注释/编码
+- 模式三（外部 Agent 识图，无需 API Key）：见 `docs/MODE3-AGENT-QUICKSTART.zh.md` / `.en.md`
 - CLI（`orbat-cli.exe`）供外部 Agent 调用：`generate / validate / audit / edit / render / batch / selfcheck`
 
 ## 环境要求

@@ -31,13 +31,42 @@ class L10n {
     } else if (code == 'zh') {
       current = AppLang.zh;
     } else {
-      // 跟随系统：读环境变量（Windows 上不可靠，退化为中文——产品以中文为先）
-      final env = '${Platform.environment['LANG'] ?? ''}'
-              '${Platform.environment['LC_ALL'] ?? ''}'
-          .toLowerCase();
-      current = (env.isEmpty || env.startsWith('zh')) ? AppLang.zh : AppLang.en;
+      current = systemLang();
     }
   }
+
+  /// 系统语言 → 界面语言。
+  ///
+  /// 探测顺序：
+  ///   1. `Platform.localeName`（Windows 上取自 GetUserDefaultLocaleName，如 zh-CN / en-US）
+  ///   2. LANG / LC_ALL 环境变量（Linux/macOS，以及被裁剪过的 Windows 环境）
+  /// 规则按产品要求：中文系统 → 中文；**其他任何语言（英/日/俄…）→ 英文**；
+  /// 完全探测不到时才退回中文（产品以中文为先）。
+  static AppLang systemLang() {
+    final byLocale = langForLocale(Platform.localeName);
+    if (byLocale != null) return byLocale;
+
+    final env = '${Platform.environment['LANG'] ?? ''}'
+            '${Platform.environment['LC_ALL'] ?? ''}'
+        .toLowerCase();
+    final byEnv = langForLocale(env);
+    if (byEnv != null) return byEnv;
+    return AppLang.zh;
+  }
+
+  /// 纯函数：locale 字符串 → 语言；无法判断时返回 null（方便单测）。
+  static AppLang? langForLocale(String localeName) {
+    final s = localeName.trim().toLowerCase();
+    if (s.isEmpty) return null;
+    if (s.startsWith('zh') || s.contains('chinese')) return AppLang.zh;
+    // 明确是某种语言时一律英文（含 en / ja / ru / de …）
+    if (RegExp(r'^[a-z]{2,3}([-_][a-z0-9]+)*$').hasMatch(s)) return AppLang.en;
+    return null;
+  }
+
+  /// 系统语言的展示名（给首启对话框说明用）
+  static String get systemLanguageLabel =>
+      Platform.localeName.isEmpty ? '—' : Platform.localeName;
 
   static void setExplicit(AppLang value) => current = value;
 
@@ -375,6 +404,44 @@ const Map<String, String> _en = {
   '产物过小（{n}B），渲染可能没画出内容': 'Output too small ({n}B) — the canvas may be empty',
   '发现 {n} 项问题': '{n} issue(s) found',
   '出图冒烟（真渲染一次）': 'Render smoke test (real render)',
+  '选择使用模式': 'Choose how you will use it',
+  '三种模式可随时在设置里切换；只有模式一、模式二需要 DeepSeek API Key。':
+      'You can switch modes anytime in Settings. Only Modes 1 and 2 need a DeepSeek API key.',
+  '在本软件界面里识图、校验、出图。需要 API Key。':
+      'Recognise, validate and render inside this app. Needs an API key.',
+  '模式二 · 软件 + CLI': 'Mode 2 · App + CLI',
+  '软件里配 Key，命令行 orbat-cli 供脚本 / Agent 调用。需要 API Key。':
+      'The app holds the key; scripts or agents drive orbat-cli. Needs an API key.',
+  '模式三 · Agent 插件（无需 API Key）': 'Mode 3 · Agent plugin (no API key)',
+  '用 orbat-cli prompts 导出提示词交给外部 Agent 识图；本软件不配 Key。':
+      'Export prompts with orbat-cli prompts and let an external agent recognise the chart; no key stored here.',
+  '模式三：不需要 API Key': 'Mode 3: no API key needed',
+  '本软件不会向你要 Key。工作方式是：\n\n1. 用 orbat-cli prompts 导出识图提示词；\n2. 把提示词和图交给你的 Agent（它用自己的模型）；\n3. 把 Agent 产出的 JSON 贴回本软件，校验与出图仍然可用。\n\n之后想在界面里直接识图，随时在设置里切到模式一/二并填写 Key。':
+      'This app will not ask for a key. How it works:/n/n1. Export the recognition prompt with orbat-cli prompts;\n2. Hand the prompt and image to your agent (it uses its own model);\n3. Paste the JSON back here — validation and rendering still work.\n\nIf you later want in-app recognition, switch to Mode 1/2 in Settings and add a key.',
+  '模式三由外部 Agent 识图，本软件不配 Key；要在界面识图请切到模式一/二并填写 Key':
+      'In Mode 3 an external agent does the recognition and this app holds no key; switch to Mode 1/2 and add a key to recognise here.',
+  '选择使用模式（可随时在设置里切换，只有模式一/二需要 Key）':
+      'Choose a mode (switchable in Settings; only Modes 1/2 need a key)',
+  '选择界面语言':
+      'Choose interface language',
+  '简体中文界面':
+      'Simplified Chinese interface',
+  '继续':
+      'Continue',
+  '检测到系统语言 {loc}，已默认选中对应语言；之后可随时在设置里更改。':
+      'System language detected: {loc}. The matching language is pre-selected; you can change it anytime in Settings.',
+  '使用教程':
+      'Tutorial',
+  '内置教程（纯文字，随界面语言切换）':
+      'Built-in tutorial (text only, follows UI language)',
+  '查看内置教程（纯文字）':
+      'Open built-in tutorial (text)',
+  '纯文字版，随界面语言切换；完整图文教程见发布页的 doc 文档。':
+      'Text-only version, follows the UI language. The illustrated tutorial is in the doc file on the release page.',
+  '复制全文':
+      'Copy all',
+  '教程全文已复制到剪贴板':
+      'Tutorial copied to clipboard',
 };
 
 /// 模板 key 以 `{name}` 形式写在 _en 里，由 tf() 替换占位符。

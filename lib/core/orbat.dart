@@ -7,7 +7,7 @@ import 'sidc_tables.dart';
 /// 一个编制节点
 class OrbatNode {
   final String uniqueDesignation; // 显示名（中文）
-  final String additionalInformation; // 注释（≤24 汉字）
+  final String additionalInformation; // 注释（≤12 汉字 / 20 字母）
   final String sidc; // 30 位
   final List<OrbatNode> children;
 
@@ -198,6 +198,14 @@ class OrbatValidator {
       if (entity == '110000' && typeMod == '98') {
         issues.add(ValidationIssue(
             'red', path, '110000(HQ) 禁止加类型修饰 98，会导致整棵子树渲染消失'));
+      }
+      // 修饰位全禁用（2026-11-19 用户明令）：主实体码后 14 位必须全 0。
+      // 只报 warn 不拦截——历史 JSON（美军 BCT 等）含 0401/0601 修饰，仍可出图。
+      final modifierTail = node.sidc.substring(16, 22); // 类型2+机动2+扇区2
+      if (modifierTail != '000000') {
+        issues.add(ValidationIssue(
+            'warn', path,
+            '修饰位 $modifierTail 非零（类型/机动/扇区）。新规范：主实体码后14位全0，载具/口径细节写进名称'));
       }
 
       // ---- 结构自洽四查（v0.4 / A2）----

@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 
 import '../i18n/l10n.dart';
 import 'l10n_ui.dart';
+import 'tutorial_dialog.dart';
 import '../core/app_paths.dart';
 import '../core/auto_fix.dart';
 import '../core/patch_repair.dart';
@@ -21,7 +22,9 @@ import '../core/usage_store.dart';
 import '../core/self_check.dart';
 import '../pipeline.dart';
 import '../ai/deepseek_client.dart';
+import '../render/renderer.dart';
 import '../services/settings_store.dart';
+import 'render_webview_page.dart';
 import 'tree_view.dart';
 
 /// 输入模式：资料为主 / 纯文本
@@ -73,7 +76,17 @@ class _HomePageState extends State<HomePage> {
   String? _svgPath;
 
   bool _busy = false;
-  String _stage = '就绪';
+
+  /// 窄屏（手机）当前分页：0=资料 1=编制树 2=预览
+  int _mobilePane = 0;
+
+  /// 对话框宽度：桌面用固定宽，手机（屏宽不足时）收窄到屏宽-48，
+  /// 否则 AlertDialog 内容会报 RIGHT OVERFLOWED BY xx PIXELS
+  double _dialogW(double desktop) {
+    final sw = MediaQuery.of(context).size.width;
+    return sw - 48 < desktop ? sw - 48 : desktop;
+  }
+  String _stage = tr('就绪');
   final List<String> _log = [];
 
   // ---- 出图进度 ----
@@ -191,6 +204,27 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    // 安卓端：出图走 WebView 线上渲染（方案 A）。注册到 pipeline 静态 hook，
+    // 之后所有 pipeline.render() 调用（含自检冒烟）都会自动分流到这里。
+    if (Platform.isAndroid) {
+      OrbatPipeline.androidRenderHook = (normalizedJson, outputBase) async {
+        if (!mounted) {
+          return RenderResult(
+              ok: false, error: '界面已关闭，无法出图', elapsed: Duration.zero);
+        }
+        final result = await Navigator.of(context).push<RenderResult>(
+          MaterialPageRoute(
+            builder: (_) => RenderWebViewPage(
+              normalizedJson: normalizedJson,
+              outputBase: outputBase,
+              whiteBackground: widget.settings.whiteBackground,
+            ),
+          ),
+        );
+        return result ??
+            RenderResult(ok: false, error: '出图被取消', elapsed: Duration.zero);
+      };
+    }
     // 命令行直接识图：`启动.exe 图.png --generate`
     final img = widget.initialImagePath;
     if (img != null && img.isNotEmpty && widget.autoGenerate) {
@@ -228,20 +262,253 @@ class _HomePageState extends State<HomePage> {
     // 未配置 API Key 时的首次引导：双击启动才弹（命令行自动任务不打扰）。
     final hasCliTask = (widget.initialImagePath ?? '').isNotEmpty ||
         (widget.initialJsonPath ?? '').isNotEmpty;
-    if (!hasCliTask && widget.settings.apiKey.trim().isEmpty) {
-      Timer(const Duration(milliseconds: 600), _showApiKeyGuide);
-    }
-    // 首次启动自动跑一次自检（含出图冒烟）：新用户第一件事就知道环境行不行
-    if (!hasCliTask && !widget.settings.firstRunSelfCheckDone) {
-      Timer(const Duration(milliseconds: 1800),
-          () => _runSelfCheck(markFirstRun: true));
+    if (!hasCliTask &&
+        (!widget.settings.languageChosen || !widget.settings.modeChosen)) {
+      // 首次启动：先问语言，再问模式。语言必须先问——模式对话框里的文案
+      // 都是按当前界面语言渲染的，语言定早了才不会出现"中英跳变"。
+      Timer(const Duration(milliseconds: 400), _firstRunFlow);
+    } else {
+      if (!hasCliTask &&
+          widget.settings.mode != 2 &&
+          widget.settings.apiKey.trim().isEmpty) {
+        Timer(const Duration(milliseconds: 600), _showApiKeyGuide);
+      }
+      // 首次启动自动跑一次自检（含出图冒烟）：新用户第一件事就知道环境行不行
+      if (!hasCliTask && !widget.settings.firstRunSelfCheckDone) {
+        Timer(const Duration(milliseconds: 1800),
+            () => _runSelfCheck(markFirstRun: true));
+      }
     }
   }
 
   /// 首启无 Key 引导：告诉用户去哪申请、在哪填，一键直达设置。
-  void _showApiKeyGuide() {
+  /// 首次启动引导链：语言 → 模式 →（需要才）Key → 自检
+  ///
+  /// 拆成一条链而不是各自起 Timer：两个对话框同时弹出会互相盖住，
+  /// 而且模式对话框的文案要先按已确定的语言渲染。
+  Future<void> _firstRunFlow() async {
     if (!mounted) return;
-    showDialog<void>(
+    if (!widget.settings.languageChosen) {
+      await _showLanguageChooser();
+      if (!mounted) return;
+    }
+    if (!widget.settings.modeChosen) {
+      // 模式对话框内部会按分支接上 Key 引导 / 模式三说明 / 自检
+      await _showModeChooser();
+      return;
+    }
+    if (widget.settings.mode != 2 && widget.settings.apiKey.trim().isEmpty) {
+      await _showApiKeyGuide();
+    }
+    if (!widget.settings.firstRunSelfCheckDone && mounted) {
+      await _runSelfCheck(markFirstRun: true);
+    }
+  }
+
+  /// 首次启动：选择界面语言
+  ///
+  /// 默认值来自系统语言（中文系统 → 中文，其他语言 → 英文），用户点一下就能改。
+  /// 直接回车/点「继续」即接受默认值——不阻塞只想快点用起来的人。
+  Future<void> _showLanguageChooser() async {
+    if (!mounted) return;
+    var picked = L10n.current;
+
+    await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx2, setD) => AlertDialog(
+          title: Text(tr('选择界面语言')),
+          content: SizedBox(
+            width: _dialogW(460),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  tf('检测到系统语言 {loc}，已默认选中对应语言；之后可随时在设置里更改。',
+                      {'loc': L10n.systemLanguageLabel}),
+                  style:
+                      TextStyle(fontSize: 12, color: Theme.of(ctx2).hintColor),
+                ),
+                const SizedBox(height: 12),
+                _pickOption(ctx2, () => setD(() => picked = AppLang.zh),
+                    picked == AppLang.zh, '中文', tr('简体中文界面')),
+                _pickOption(ctx2, () => setD(() => picked = AppLang.en),
+                    picked == AppLang.en, 'English', 'English interface'),
+              ],
+            ),
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(ctx2).pop(true),
+              child: Text(tr('继续')),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    widget.settings.language = picked == AppLang.en ? 'en' : 'zh';
+    widget.settings.languageChosen = true;
+    applyLanguage(widget.settings.language);
+    await widget.settings.save();
+    AppLogger.instance
+        .info('ui', '首次启动选择界面语言: ${widget.settings.language}');
+  }
+
+  /// 首次启动：选择使用模式
+  ///
+  /// 这一步放在最前面是有原因的：模式三（Agent 插件）**不需要 API Key**。
+  /// 以前不管当前是什么模式，一律先弹「填 Key」，只用 Agent 的用户会以为必须买 Key。
+  Future<void> _showModeChooser() async {
+    if (!mounted) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx2, setD) => AlertDialog(
+          title: Text(tr('选择使用模式')),
+          content: SizedBox(
+            width: _dialogW(560),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  tr('三种模式可随时在设置里切换；只有模式一、模式二需要 DeepSeek API Key。'),
+                  style:
+                      TextStyle(fontSize: 12, color: Theme.of(ctx2).hintColor),
+                ),
+                const SizedBox(height: 12),
+                _modeOption(ctx2, setD, 0, tr('模式一 · 纯软件'),
+                    tr('在本软件界面里识图、校验、出图。需要 API Key。')),
+                // 安卓端暂不支持模式二（无 CLI）
+                if (!Platform.isAndroid)
+                  _modeOption(ctx2, setD, 1, tr('模式二 · 软件 + CLI'),
+                      tr('软件里配 Key，命令行 orbat-cli 供脚本 / Agent 调用。需要 API Key。'))
+                else
+                  _modeOption(ctx2, setD, 1, tr('模式二 · 软件 + CLI（安卓暂不支持）'),
+                      tr('CLI 依赖桌面环境，安卓端二期再评估。请选模式一或模式三。')),
+                _modeOption(ctx2, setD, 2, tr('模式三 · Agent 插件（无需 API Key）'),
+                    tr('用 orbat-cli prompts 导出提示词交给外部 Agent 识图；本软件不配 Key。')),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx2).pop(false),
+              child: Text(tr('稍后再说')),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx2).pop(true),
+              child: Text(tr('确定')),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    widget.settings.modeChosen = true;
+    setState(() {});
+    await widget.settings.save();
+    AppLogger.instance
+        .info('ui', '首次启动选择模式: ${widget.settings.mode}（confirmed=$ok）');
+
+    if (widget.settings.mode == 2) {
+      if (mounted) await _explainAgentMode();
+    } else if (widget.settings.apiKey.trim().isEmpty) {
+      if (mounted) await _showApiKeyGuide();
+    }
+    if (!widget.settings.firstRunSelfCheckDone && mounted) {
+      await _runSelfCheck(markFirstRun: true);
+    }
+  }
+
+  /// 模式选项卡片（选中态高亮）
+  Widget _modeOption(BuildContext ctx, StateSetter setD, int value, String title,
+          String subtitle) =>
+      _pickOption(ctx, () => setD(() => widget.settings.mode = value),
+          widget.settings.mode == value, title, subtitle);
+
+  /// 通用单选项卡片：语言、模式共用（只有一处样式，避免两套视觉）
+  Widget _pickOption(BuildContext ctx, VoidCallback onTap, bool selected,
+      String title, String subtitle) {
+    final scheme = Theme.of(ctx).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: selected ? scheme.primary : Theme.of(ctx).dividerColor,
+              width: selected ? 1.6 : 1,
+            ),
+            color: selected ? scheme.primary.withValues(alpha: 0.06) : null,
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                selected ? Icons.radio_button_checked : Icons.radio_button_off,
+                size: 18,
+                color: selected ? scheme.primary : Theme.of(ctx).hintColor,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title,
+                        style: const TextStyle(
+                            fontSize: 13, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 2),
+                    Text(subtitle,
+                        style: TextStyle(
+                            fontSize: 11, color: Theme.of(ctx).hintColor)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 模式三说明（不弹 Key 引导，改讲 Agent 流程）
+  Future<void> _explainAgentMode() async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(tr('模式三：不需要 API Key')),
+        content: SizedBox(
+          width: _dialogW(520),
+          child: Text(
+            tr('本软件不会向你要 Key。工作方式是：\n\n'
+                '1. 用 orbat-cli prompts 导出识图提示词；\n'
+                '2. 把提示词和图交给你的 Agent（它用自己的模型）；\n'
+                '3. 把 Agent 产出的 JSON 贴回本软件，校验与出图仍然可用。\n\n'
+                '之后想在界面里直接识图，随时在设置里切到模式一/二并填写 Key。'),
+            style: const TextStyle(fontSize: 12, height: 1.6),
+          ),
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(tr('知道了')),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showApiKeyGuide() async {
+    if (!mounted) return;
+    await showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(tr('先配置 API Key')),
@@ -309,7 +576,9 @@ class _HomePageState extends State<HomePage> {
   Future<void> _generate() async {
     if (_busy) return;
     if (widget.settings.apiKey.trim().isEmpty) {
-      _snack(tr('请先在右上角设置里填写 DeepSeek API Key'));
+      _snack(widget.settings.mode == 2
+          ? tr('模式三由外部 Agent 识图，本软件不配 Key；要在界面识图请切到模式一/二并填写 Key')
+          : tr('请先在右上角设置里填写 DeepSeek API Key'));
       return;
     }
     if (_inputMode == InputMode.textOnly && _textCtrl.text.trim().isEmpty) {
@@ -451,7 +720,8 @@ class _HomePageState extends State<HomePage> {
       _snack(tr('还没有可出图的编制数据'));
       return;
     }
-    if (widget.settings.renderScriptPath.trim().isEmpty) {
+    // 安卓走 WebView 线上渲染，不需要本地渲染脚本
+    if (!Platform.isAndroid && widget.settings.renderScriptPath.trim().isEmpty) {
       _snack(tr('请在设置里指定渲染脚本 render_orbat.js 的路径'));
       return;
     }
@@ -552,6 +822,10 @@ class _HomePageState extends State<HomePage> {
         AppLogger.instance.info('ui',
             '出图完成: $saved @ ${settings.outputDir.isEmpty ? "默认目录" : settings.outputDir} (${result.elapsed.inSeconds}s)');
         _appendLog('出图完成（$saved）：$base（${result.elapsed.inSeconds}s）');
+        // 窄屏：出图完成后自动切到预览页，让用户直接看到图
+        if (MediaQuery.of(context).size.width < 640) {
+          setState(() => _mobilePane = 2);
+        }
       } else {
         _appendLog('出图失败：${result.error}');
         _snack(tr('出图失败，详见下方日志'));
@@ -796,7 +1070,7 @@ class _HomePageState extends State<HomePage> {
       _jsonCtrl.clear();
       _pngPath = null;
       _log.clear();
-      _stage = '就绪';
+      _stage = tr('就绪');
     });
     _appendLog('已重置到初始状态（换新版本请关闭窗口后重新打开）');
   }
@@ -1002,7 +1276,7 @@ class _HomePageState extends State<HomePage> {
         return AlertDialog(
           title: Text(tr('API 用量')),
           content: SizedBox(
-            width: 560,
+            width: _dialogW(560),
             height: 460,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1115,7 +1389,7 @@ class _HomePageState extends State<HomePage> {
   ///
   /// [markFirstRun] 首次启动自动跑时为 true：跑完记一个标记，以后不再自动弹。
   Future<void> _runSelfCheck({bool markFirstRun = false}) async {
-    setState(() => _stage = '自检中…');
+    setState(() => _stage = tr('自检中…'));
     SelfCheckResult result;
     try {
       result = await SelfCheck.run(
@@ -1123,6 +1397,7 @@ class _HomePageState extends State<HomePage> {
         apiKey: widget.settings.apiKey,
         // 真渲染一次（约 15-25 秒）：把"能不能出图"从猜测变成结论
         smokeRender: true,
+        outputDir: outputDir,
       );
     } catch (e) {
       _snack('自检失败：$e');
@@ -1158,7 +1433,7 @@ class _HomePageState extends State<HomePage> {
             ],
           ),
           content: SizedBox(
-            width: 560,
+            width: _dialogW(560),
             height: 420,
             child: ListView(
               children: result.items.map((i) {
@@ -1232,7 +1507,7 @@ class _HomePageState extends State<HomePage> {
         builder: (ctx, setDlgState) => AlertDialog(
           title: Text(tr('设置')),
           content: SizedBox(
-            width: 520,
+            width: _dialogW(520),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -1246,10 +1521,24 @@ class _HomePageState extends State<HomePage> {
                   ),
                   items: [
                     for (var i = 0; i < modeNames.length; i++)
-                      DropdownMenuItem(value: i, child: Text(modeNames[i])),
+                      DropdownMenuItem(
+                        value: i,
+                        // 安卓端暂不支持模式二（无 CLI）
+                        enabled: !(Platform.isAndroid && i == 1),
+                        child: Text(
+                          (Platform.isAndroid && i == 1)
+                              ? '${modeNames[i]}（安卓暂不支持）'
+                              : modeNames[i],
+                          style: (Platform.isAndroid && i == 1)
+                              ? TextStyle(color: Theme.of(ctx).hintColor)
+                              : null,
+                        ),
+                      ),
                   ],
                   onChanged: (v) {
                     if (v == null) return;
+                    // 安卓端不允许选模式二
+                    if (Platform.isAndroid && v == 1) return;
                     setDlgState(() => modeVal = v);
                   },
                 ),
@@ -1336,6 +1625,15 @@ class _HomePageState extends State<HomePage> {
                     await widget.settings.save();
                     setDlgState(() {});
                   },
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: OutlinedButton.icon(
+                    onPressed: () => showTutorialDialog(ctx),
+                    icon: const Icon(Icons.menu_book_outlined, size: 16),
+                    label: Text(tr('查看内置教程（纯文字）')),
+                  ),
                 ),
                 const SizedBox(height: 12),
                 TextField(
@@ -1427,13 +1725,17 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // 窄屏（手机竖屏）：三面板并排放不下，改「分段切换」+ AppBar 收纳
+    final narrow = MediaQuery.of(context).size.width < 640;
     return Scaffold(
       appBar: AppBar(
         title: Row(
           children: [
             const Icon(Icons.account_tree_outlined, size: 22),
-            const SizedBox(width: 10),
-            Text(tr('编制图生成器'), style: TextStyle(fontSize: 18)),
+            if (!narrow) ...[
+              const SizedBox(width: 10),
+              Text(tr('编制图生成器'), style: TextStyle(fontSize: 18)),
+            ],
             const SizedBox(width: 12),
             if (_busy)
               const SizedBox(
@@ -1443,76 +1745,237 @@ class _HomePageState extends State<HomePage> {
               ),
           ],
         ),
-        actions: [
-          TextButton.icon(
-            onPressed: _busy ? null : _pickImage,
-            icon: const Icon(Icons.image_outlined, size: 18),
-            label: Text(tr('选择图片')),
-          ),
-          const SizedBox(width: 6),
-          FilledButton.icon(
-            onPressed: _busy ? null : _generate,
-            icon: const Icon(Icons.auto_awesome, size: 18),
-            label: Text(tr('生成编制')),
-          ),
-          const SizedBox(width: 6),
-          OutlinedButton.icon(
-            onPressed: _busy ? null : _render,
-            icon: const Icon(Icons.photo_outlined, size: 18),
-            label: Text(tr('出图')),
-          ),
-          const SizedBox(width: 10),
-          IconButton(
-            tooltip: tr('打开已有编制 JSON'),
-            onPressed: _busy ? null : _openJson,
-            icon: const Icon(Icons.folder_open_outlined),
-          ),
-          IconButton(
-            tooltip: tr('API 用量（调用次数 / token 消耗）'),
-            onPressed: _showUsage,
-            icon: const Icon(Icons.data_usage_outlined),
-          ),
-          IconButton(
-            tooltip: tr('查看 API 对话（观察/思考过程、JSON、自检、Prompt）'),
-            onPressed: _showConversation,
-            icon: const Icon(Icons.chat_bubble_outline),
-          ),
-          IconButton(
-            tooltip: tr('环境自检（检查依赖与工具是否齐全）'),
-            onPressed: _busy ? null : _runSelfCheck,
-            icon: const Icon(Icons.health_and_safety_outlined),
-          ),
-          IconButton(
-            tooltip: tr('切换主题'),
-            onPressed: widget.onToggleTheme,
-            icon: const Icon(Icons.brightness_6_outlined),
-          ),
-          IconButton(
-            tooltip: tr('重置（清空当前内容，回到初始状态）'),
-            onPressed: _busy ? null : _resetApp,
-            icon: const Icon(Icons.refresh),
-          ),
-          IconButton(
-            tooltip: tr('设置'),
-            onPressed: _openSettings,
-            icon: const Icon(Icons.settings_outlined),
-          ),
-          const SizedBox(width: 8),
-        ],
+        actions: narrow ? _buildMobileActions(theme) : _buildDesktopActions(),
       ),
-      body: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SizedBox(width: 320, child: _buildInputPane(theme)),
-          const VerticalDivider(width: 1),
-          Expanded(flex: 5, child: _buildTreePane(theme)),
-          const VerticalDivider(width: 1),
-          Expanded(flex: 4, child: _buildPreviewPane(theme)),
-        ],
-      ),
+      body: narrow
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(10, 6, 10, 2),
+                  child: SegmentedButton<int>(
+                    segments: [
+                      ButtonSegment(
+                          value: 0,
+                          icon: Icon(Icons.edit_note_outlined, size: 16),
+                          label: Text(tr('资料'))),
+                      ButtonSegment(
+                          value: 1,
+                          icon: Icon(Icons.account_tree_outlined, size: 16),
+                          label: Text(tr('编制树'))),
+                      ButtonSegment(
+                          value: 2,
+                          icon: Icon(Icons.image_outlined, size: 16),
+                          label: Text(tr('预览'))),
+                    ],
+                    selected: {_mobilePane},
+                    onSelectionChanged: (s) =>
+                        setState(() => _mobilePane = s.first),
+                    showSelectedIcon: false,
+                    style: const ButtonStyle(
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: IndexedStack(
+                    index: _mobilePane,
+                    children: [
+                      _buildInputPane(theme),
+                      _buildTreePane(theme),
+                      _buildPreviewPane(theme),
+                    ],
+                  ),
+                ),
+              ],
+            )
+          : Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SizedBox(width: 320, child: _buildInputPane(theme)),
+                const VerticalDivider(width: 1),
+                Expanded(flex: 5, child: _buildTreePane(theme)),
+                const VerticalDivider(width: 1),
+                Expanded(flex: 4, child: _buildPreviewPane(theme)),
+              ],
+            ),
       bottomNavigationBar: _buildStatusBar(theme),
     );
   }
+
+  /// 桌面端 AppBar 动作（原有布局，保持不变）
+  List<Widget> _buildDesktopActions() => [
+        TextButton.icon(
+          onPressed: _busy ? null : _pickImage,
+          icon: const Icon(Icons.image_outlined, size: 18),
+          label: Text(tr('选择图片')),
+        ),
+        const SizedBox(width: 6),
+        FilledButton.icon(
+          onPressed: _busy ? null : _generate,
+          icon: const Icon(Icons.auto_awesome, size: 18),
+          label: Text(tr('生成编制')),
+        ),
+        const SizedBox(width: 6),
+        OutlinedButton.icon(
+          onPressed: _busy ? null : _render,
+          icon: const Icon(Icons.photo_outlined, size: 18),
+          label: Text(tr('出图')),
+        ),
+        const SizedBox(width: 10),
+        IconButton(
+          tooltip: tr('打开已有编制 JSON'),
+          onPressed: _busy ? null : _openJson,
+          icon: const Icon(Icons.folder_open_outlined),
+        ),
+        IconButton(
+          tooltip: tr('API 用量（调用次数 / token 消耗）'),
+          onPressed: _showUsage,
+          icon: const Icon(Icons.data_usage_outlined),
+        ),
+        IconButton(
+          tooltip: tr('查看 API 对话（观察/思考过程、JSON、自检、Prompt）'),
+          onPressed: _showConversation,
+          icon: const Icon(Icons.chat_bubble_outline),
+        ),
+        IconButton(
+          tooltip: tr('内置教程（纯文字，随界面语言切换）'),
+          onPressed: () => showTutorialDialog(context),
+          icon: const Icon(Icons.menu_book_outlined),
+        ),
+        IconButton(
+          tooltip: tr('环境自检（检查依赖与工具是否齐全）'),
+          onPressed: _busy ? null : _runSelfCheck,
+          icon: const Icon(Icons.health_and_safety_outlined),
+        ),
+        IconButton(
+          tooltip: tr('切换主题'),
+          onPressed: widget.onToggleTheme,
+          icon: const Icon(Icons.brightness_6_outlined),
+        ),
+        IconButton(
+          tooltip: tr('重置（清空当前内容，回到初始状态）'),
+          onPressed: _busy ? null : _resetApp,
+          icon: const Icon(Icons.refresh),
+        ),
+        IconButton(
+          tooltip: tr('设置'),
+          onPressed: _openSettings,
+          icon: const Icon(Icons.settings_outlined),
+        ),
+        const SizedBox(width: 8),
+      ];
+
+  /// 窄屏（手机）AppBar 动作：核心操作保留，其余收进「更多」菜单
+  List<Widget> _buildMobileActions(ThemeData theme) => [
+        FilledButton.icon(
+          onPressed: _busy ? null : _generate,
+          icon: const Icon(Icons.auto_awesome, size: 16),
+          label: Text(tr('生成')),
+        ),
+        OutlinedButton.icon(
+          onPressed: _busy ? null : _render,
+          icon: const Icon(Icons.photo_outlined, size: 16),
+          label: Text(tr('出图')),
+        ),
+        PopupMenuButton<String>(
+          tooltip: tr('更多功能'),
+          onSelected: (v) {
+            switch (v) {
+              case 'image':
+                _pickImage();
+                break;
+              case 'json':
+                _openJson();
+                break;
+              case 'usage':
+                _showUsage();
+                break;
+              case 'conv':
+                _showConversation();
+                break;
+              case 'tutorial':
+                showTutorialDialog(context);
+                break;
+              case 'check':
+                _runSelfCheck();
+                break;
+              case 'reset':
+                _resetApp();
+                break;
+            }
+          },
+          itemBuilder: (_) => [
+            PopupMenuItem(
+                value: 'image',
+                child: ListTile(
+                  leading: Icon(Icons.image_outlined, size: 20),
+                  title: Text(tr('选择图片'), style: TextStyle(fontSize: 14)),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                )),
+            PopupMenuItem(
+                value: 'json',
+                child: ListTile(
+                  leading: Icon(Icons.folder_open_outlined, size: 20),
+                  title: Text(tr('打开编制 JSON'), style: TextStyle(fontSize: 14)),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                )),
+            PopupMenuItem(
+                value: 'usage',
+                child: ListTile(
+                  leading: Icon(Icons.data_usage_outlined, size: 20),
+                  title: Text(tr('API 用量'), style: TextStyle(fontSize: 14)),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                )),
+            PopupMenuItem(
+                value: 'conv',
+                child: ListTile(
+                  leading: Icon(Icons.chat_bubble_outline, size: 20),
+                  title: Text(tr('API 对话'), style: TextStyle(fontSize: 14)),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                )),
+            PopupMenuItem(
+                value: 'tutorial',
+                child: ListTile(
+                  leading: Icon(Icons.menu_book_outlined, size: 20),
+                  title: Text(tr('教程'), style: TextStyle(fontSize: 14)),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                )),
+            PopupMenuItem(
+                value: 'check',
+                child: ListTile(
+                  leading: Icon(Icons.health_and_safety_outlined, size: 20),
+                  title: Text(tr('环境自检'), style: TextStyle(fontSize: 14)),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                )),
+            PopupMenuItem(
+                value: 'reset',
+                child: ListTile(
+                  leading: Icon(Icons.refresh, size: 20),
+                  title: Text(tr('重置'), style: TextStyle(fontSize: 14)),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                )),
+          ],
+        ),
+        IconButton(
+          tooltip: tr('切换主题'),
+          onPressed: widget.onToggleTheme,
+          icon: const Icon(Icons.brightness_6_outlined),
+        ),
+        IconButton(
+          tooltip: tr('设置'),
+          onPressed: _openSettings,
+          icon: const Icon(Icons.settings_outlined),
+        ),
+        const SizedBox(width: 4),
+      ];
 
   Widget _buildInputPane(ThemeData theme) {
     return Padding(
@@ -2159,7 +2622,7 @@ class _HomePageState extends State<HomePage> {
         return AlertDialog(
           title: Text(tr('选择一个单位')),
           content: SizedBox(
-            width: 560,
+            width: _dialogW(560),
             height: 420,
             child: Column(
               children: [
@@ -2545,13 +3008,16 @@ class _HomePageState extends State<HomePage> {
           child: LayoutBuilder(builder: (context, constraints) {
             final compact = constraints.maxWidth < 560;
             final hideTitle = constraints.maxWidth < 430;
-            return Row(
+            // Wrap：手机窄屏放不下时自动换行，桌面宽屏仍是一行（原来 Row 会溢出 29px）
+            return Wrap(
+              spacing: 2,
+              runSpacing: 2,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 if (!hideTitle) ...[
                   Text(tr('出图成品'), style: theme.textTheme.titleSmall),
-                  const Spacer(),
-                ] else
-                  const Spacer(),
+                  const SizedBox(width: 8),
+                ],
                 // 产物勾选：决定出图时输出哪些文件
                 _outputChip('JSON', widget.settings.emitJson, (v) async {
                   setState(() => widget.settings.emitJson = v);

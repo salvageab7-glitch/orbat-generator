@@ -12,18 +12,106 @@
 library;
 
 import 'orbat.dart';
+import 'schema_rules.dart';
 
 class OrbatAutoFix {
   /// 对整棵树做机械修复，返回新树（不修改原对象）
   static OrbatNode apply(OrbatNode root) => _fix(root);
 
+  /// 自检说明黑名单——模型把「看不清」类说明写进了数据字段，
+  /// 渲染出来就是「支援单位，符号不清」这种怪注释，必须清掉。
+  /// 正则定义统一放在 schema_rules.dart，校验器与这里共用一套。
+  static final RegExp _selfCheckNote = kSelfCheckNotePattern;
+
+  /// 残缺占位标记，如「Sy[?]」「17th[?]」
+  static final RegExp _truncatedMark = RegExp(r'\[\?\]$');
+
   static OrbatNode _fix(OrbatNode n) {
+    final fixedChildren = n.children.map(_fix).toList();
+    final merged = _mergeSiblings(fixedChildren);
     return OrbatNode(
       uniqueDesignation: _fixName(n.uniqueDesignation),
       additionalInformation: _fixNote(n.additionalInformation),
       sidc: _fixSidc(n.sidc),
-      children: n.children.map(_fix).toList(),
+      children: merged,
     );
+  }
+
+  /// 同一父节点下的兄弟去重合并（0.3.1 新增）。
+  ///
+  /// 分块识图时，跨块边界的同一单位常被两块各自识别：
+  /// 一份名称残缺（「Sy[?]」、注释「M[?]」），一份完整。
+  /// 旧逻辑只在挂载阶段按**同名**合并，残缺名与全名不同就漏网，
+  /// 导致产图里同一个旅出现两份、注释一半是占位符。
+  static List<OrbatNode> _mergeSiblings(List<OrbatNode> nodes) {
+    final out = <OrbatNode>[];
+    for (final node in nodes) {
+      final name = node.uniqueDesignation;
+      final truncated = _truncatedMark.hasMatch(name);
+      final clean = name.replaceAll(_truncatedMark, '').trim();
+
+      int targetIdx = -1;
+      for (var i = 0; i < out.length; i++) {
+        final on = out[i].uniqueDesignation;
+        final onTruncated = _truncatedMark.hasMatch(on);
+        final onClean = on.replaceAll(_truncatedMark, '').trim();
+        // ① 完全同名：直接合并
+        if (on == name) {
+          targetIdx = i;
+          break;
+        }
+        // ② 当前残缺、已有全名以残缺名开头（Sy[?] → Sydney University Regiment）
+        if (truncated && clean.length >= 2 && on.startsWith(clean)) {
+          targetIdx = i;
+          break;
+        }
+        // ③ 已有残缺、当前全名以其开头（残缺先入列的反向场景）
+        if (onTruncated && onClean.length >= 2 && name.startsWith(onClean)) {
+          targetIdx = i;
+          break;
+        }
+      }
+
+      if (targetIdx < 0) {
+        out.add(node);
+        continue;
+      }
+
+      // 字段级补全：目标缺什么就用来源补什么，绝不覆盖已有完整值。
+      // 名称：残缺方让位给完整方。OrbatNode 字段全 final，合并 = 构建新节点。
+      final t = out[targetIdx];
+      final tTruncated = _truncatedMark.hasMatch(t.uniqueDesignation);
+      final mergedName =
+          tTruncated && !truncated ? name : t.uniqueDesignation;
+      final noteSrc = tTruncated && !truncated ? node : t;
+      var note = noteSrc.additionalInformation;
+      if (note.trim().isEmpty ||
+          note.contains('[?]') ||
+          _selfCheckNote.hasMatch(note)) {
+        final other =
+            identical(noteSrc, node) ? t : node;
+        if (!other.additionalInformation.contains('[?]') &&
+            !_selfCheckNote.hasMatch(other.additionalInformation)) {
+          note = other.additionalInformation;
+        }
+      }
+      var sidc = t.sidc;
+      if (_isPlaceholderSidc(sidc) && !_isPlaceholderSidc(node.sidc)) {
+        sidc = node.sidc;
+      }
+      out[targetIdx] = OrbatNode(
+        uniqueDesignation: mergedName,
+        additionalInformation: _fixNote(note),
+        sidc: sidc,
+        children: [...t.children, ...node.children],
+      );
+    }
+    return out;
+  }
+
+  static bool _isPlaceholderSidc(String s) {
+    final body = s.length > 15 ? s.substring(10, 16) : '';
+    return body.isEmpty || body == '000000';
   }
 
   /// SIDC：去非数字、按 30 位补齐或截断
@@ -56,22 +144,15 @@ class OrbatAutoFix {
     return s;
   }
 
-  /// 注释：汉字超过 24 个就截断
+  /// 注释：自检说明清空；含 [?] 残缺标记清空（半截注释不如没有）；
+  /// 超长按硬上限裁剪（12 汉字 / 20 字母，见 schema_rules.dart）
   static String _fixNote(String note) {
-    final s = note.trim();
-    if (_cjkCount(s) <= 24) return s;
-
-    final buf = StringBuffer();
-    var cjk = 0;
-    for (final rune in s.runes) {
-      if (rune > 0x2E80) {
-        if (cjk >= 24) break;
-        cjk++;
-      }
-      buf.writeCharCode(rune);
+    var s = note.trim();
+    if (_selfCheckNote.hasMatch(s) || s.contains('[?]')) return '';
+    if (kCommanderPattern.hasMatch(s)) {
+      // 「师长张某某」这类整句删掉；只删命中片段会留下残句，不如置空
+      return '';
     }
-    return buf.toString();
+    return clampNote(s);
   }
-
-  static int _cjkCount(String s) => s.runes.where((r) => r > 0x2E80).length;
 }

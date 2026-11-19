@@ -15,6 +15,8 @@ import 'dart:io';
 import '../core/app_paths.dart';
 import '../core/logger.dart';
 import '../core/auto_fix.dart';
+import '../i18n/l10n.dart';
+import '../i18n/tutorial_text.dart';
 import '../core/dup_scan.dart';
 import '../core/orbat.dart';
 import '../core/patch_repair.dart';
@@ -174,6 +176,9 @@ Future<void> _runMain(List<String> args) async {
         break;
       case 'config':
         await _cmdConfig(rest);
+        break;
+      case 'tutorial':
+        await _cmdTutorial(args);
         break;
       case 'prompts':
         await _cmdPrompts(rest);
@@ -612,6 +617,7 @@ Future<void> _cmdSelfCheck(List<String> args) async {
     apiKey: settings.apiKey,
     // selfcheck --smoke：真渲染一次，验证"能不能出图"（约 15-25 秒）
     smokeRender: args.contains('--smoke'),
+    outputDir: _defaultCliOutputDir(),
   );
   _out(_ok('selfcheck', {
         'allOk': r.allOk,
@@ -810,6 +816,36 @@ String _baseName(String path) {
 }
 
 /// 导出软件内置的工作流提示词（模式三：Agent 全权，无需软件配 API）
+/// tutorial —— 打印/导出内置纯文字教程（GUI 教程窗口用的是同一份文本）
+///
+/// 为什么要开这个命令：模式三的用户常常在 Agent 里问"下一步怎么做"，
+/// 让 Agent 直接读这份文本比让用户翻 doc 更现实。默认跟随系统语言，
+/// 可用 --lang zh|en 强制。
+Future<void> _cmdTutorial(List<String> args) async {
+  final lang = (_option(args, 'lang') ?? '').toLowerCase();
+  if (lang == 'en') {
+    L10n.setExplicit(AppLang.en);
+  } else if (lang == 'zh') {
+    L10n.setExplicit(AppLang.zh);
+  } else {
+    L10n.apply('');
+  }
+  final text = tutorialText();
+  final outFile = _option(args, 'out');
+  String? savedPath;
+  if (outFile != null && outFile.isNotEmpty) {
+    await File(outFile).writeAsString(text);
+    savedPath = outFile;
+  }
+  _out(_ok('tutorial', {
+    'revision': kTutorialRevision,
+    'lang': L10n.isEn ? 'en' : 'zh',
+    'out': savedPath,
+    'chars': text.length,
+    'text': text,
+  }));
+}
+
 Future<void> _cmdPrompts(List<String> args) async {
   final which = _option(args, 'type') ?? 'all';
   final outFile = _option(args, 'out');

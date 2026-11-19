@@ -1,7 +1,7 @@
 name: orbat_core
 description: ORBAT 编制图生成器 —— Windows / Android 双端
 publish_to: none
-version: 0.3.4-beta
+version: 0.3.5-beta
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -13,6 +13,13 @@ dependencies:
   file_picker: ^8.1.7
   # 纯 Dart 图片处理：大图缩放与切片（跨端可用，不依赖原生库）
   image: ^4.13.1
+  # Windows DPAPI（CryptProtectData）需要：纯 Dart FFI，GUI 与 CLI 共用
+  win32: ^5.15.0
+  ffi: ^2.0.0
+  # 安卓端：应用私有目录（配置/产物路径）
+  path_provider: ^2.1.5
+  # 安卓端出图（方案A）：内置 WebView 加载 spatialillusions 线上站点渲染
+  webview_flutter: ^4.13.0
 
 dev_dependencies:
   flutter_test:

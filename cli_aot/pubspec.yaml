@@ -1,10 +1,13 @@
 name: orbat_cli
 description: ORBAT CLI - standalone AOT binary
 publish_to: none
-version: 0.2.0
+version: 0.3.5
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
 
 dependencies:
   image: ^4.13.1
+  # core/secret_store.dart 用 DPAPI 解密 API Key（纯 Dart FFI）
+  win32: ^5.15.0
+  ffi: ^2.0.0

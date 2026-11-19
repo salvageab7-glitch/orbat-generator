@@ -142,6 +142,53 @@ class DeepSeekClient {
     ], onProgress: onProgress);
   }
 
+  /// 记录一次失败的调用（状态码 / 响应体片段 / 耗时 / 第几次尝试）。
+  ///
+  /// 用户反馈"识别没反应"时，日志里的这一行通常就是结论：
+  /// Key 无效(401)、余额不足(402)、限流(429)、服务 5xx、还是本机网络超时。
+  /// 之前这些信息只存在内存里的 lastError，关窗即失，排查全靠猜。
+  void _logFailure({
+    required int attempt,
+    required String stage,
+    int? status,
+    String? body,
+    Object? error,
+    int? elapsedMs,
+  }) {
+    final head = (body ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
+    final snippet = head.length > 500 ? '${head.substring(0, 500)}…' : head;
+    final errText = error?.toString().replaceAll(RegExp(r'\s+'), ' ') ?? '';
+    AppLogger.instance.warn(
+      'ai-error',
+      'attempt=$attempt/${config.maxRetries} stage=$stage'
+      '${status != null ? " status=$status" : ""}'
+      '${elapsedMs != null ? " ms=$elapsedMs" : ""}'
+      '${errText.isNotEmpty ? " err=${errText.length > 200 ? "${errText.substring(0, 200)}…" : errText}" : ""}'
+      '${snippet.isNotEmpty ? " body=$snippet" : ""}',
+    );
+  }
+
+  /// 把 HTTP 状态翻译成可执行的提示（用户看得懂、知道该去干什么）
+  String _describeHttp(int status, String body) {
+    switch (status) {
+      case 400:
+        return '请求格式错误（400）：$body';
+      case 401:
+        return 'API Key 无效或无权限（401）。请在设置里重新填写 DeepSeek Key';
+      case 402:
+        return '账户余额不足（402）。请到 platform.deepseek.com 充值';
+      case 403:
+        return '请求被拒绝（403）。请检查 Key 的权限或所在网络是否被限制';
+      case 429:
+        return '请求过于频繁（429）。稍等几十秒再试，或减少批量任务数';
+      default:
+        if (status >= 500) {
+          return 'DeepSeek 服务端异常（$status），稍后重试即可';
+        }
+        return 'HTTP $status: $body';
+    }
+  }
+
   Future<GenerateResult> _runWithRetry(
     List<Map<String, dynamic>> userContent, {
     bool jsonMode = true,
@@ -189,8 +236,19 @@ class DeepSeekClient {
         final respBody = resp.body;
 
         if (resp.status != 200) {
-          lastError = 'HTTP ${resp.status}: $respBody';
+          lastError = _describeHttp(resp.status, respBody);
+          _logFailure(
+            attempt: attempt,
+            stage: 'http',
+            status: resp.status,
+            body: respBody,
+            elapsedMs: DateTime.now().difference(t0).inMilliseconds,
+          );
           onProgress?.call('请求失败：$lastError');
+          // 401/402/403 属于"重试也没用"的错误，立刻停止，别让用户白等两轮
+          if (resp.status == 401 || resp.status == 402 || resp.status == 403) {
+            break;
+          }
           continue;
         }
 
@@ -241,6 +299,13 @@ class DeepSeekClient {
             lastError = '返回 content 为空（JSON Output 兜底触发）';
           }
           lastRaw = content.isNotEmpty ? content : reasoning;
+          _logFailure(
+            attempt: attempt,
+            stage: finishReason == 'length' ? 'truncated-empty' : 'empty-content',
+            status: resp.status,
+            body: reasoning.isNotEmpty ? reasoning : content,
+            elapsedMs: callMs,
+          );
           onProgress?.call('$lastError，重试…');
           continue;
         }
@@ -271,6 +336,13 @@ class DeepSeekClient {
               '未生成完整 JSON。这张图单位过多/文字过密，'
               '请尝试：① 用裁剪工具把图分成几张分别识别；② 在补充说明里写结构骨架。';
           onProgress?.call('输出过长被截断，已停止重试');
+          _logFailure(
+            attempt: attempt,
+            stage: 'truncated',
+            status: resp.status,
+            body: 'inTok=$inTok0 outTok=$outTok0 finish=$finishReason',
+            elapsedMs: callMs,
+          );
           lastRaw = content;
           break;
         }
@@ -288,6 +360,7 @@ class DeepSeekClient {
         return GenerateResult(tree: tree, rawJson: clean, attempts: attempt);
       } catch (e) {
         lastError = e.toString();
+        _logFailure(attempt: attempt, stage: 'exception', error: e);
         onProgress?.call('解析异常：$lastError');
       }
     }

@@ -206,14 +206,14 @@ class SidcRule {
     final foreign = _foreignArm(n);
     if (foreign != null) return foreign;
 
-    // ---- 火箭炮（须在普通炮兵之前判断）----
+    // ---- 火箭炮（站点无独立实体码；修饰位已禁用，统一用 130300 靠名称区分）----
     if (n.contains('火箭炮') ||
         n.contains('火箭') ||
         n.contains('Град') ||
         n.contains('БМ-') ||
         n.contains('Ураган') ||
         n.contains('Смерч')) {
-      return const _Arm('130300', '41', '04', '多管火箭炮');
+      return const _Arm('130300', '00', '00', '火箭炮(名称区分)');
     }
 
     // ---- 反坦克导弹（须在普通反坦克之前）----
@@ -224,7 +224,7 @@ class SidcRule {
         n.contains('Штурм') ||
         n.contains('Фагот') ||
         n.contains('Малютка')) {
-      return const _Arm('120400', '37', '00', '反坦克导弹');
+      return const _Arm('120400', '00', '00', '反坦克导弹');
     }
 
     // ---- 反坦克（火炮/通用）----
@@ -234,16 +234,21 @@ class SidcRule {
 
     // ---- 迫击炮（须在炮兵之前）----
     if (n.contains('迫击炮') || n.contains('2С9') || n.contains('2Б') || n.contains('Миномёт')) {
-      return const _Arm('130800', '12', '00', '迫击炮');
+      return const _Arm('130800', '00', '00', '迫击炮');
     }
 
-    // ---- 自行火炮 ----
+    // ---- 自行火炮（履带式，130301；站点权威语义）----
     if (n.contains('自行火炮') ||
         n.contains('2С1') ||
         n.contains('2С3') ||
         n.contains('2С19') ||
         n.contains('自行炮')) {
-      return const _Arm('130300', '00', '04', '自行火炮');
+      return const _Arm('130301', '00', '00', '自行火炮(履带)');
+    }
+
+    // ---- 炮兵侦察/观察（须在普通炮兵之前，站点 130400）----
+    if (n.contains('炮兵侦察') || n.contains('炮兵观察') || n.contains('炮观') || n.contains('前方观察')) {
+      return const _Arm('130400', '00', '00', '炮兵侦察/观察');
     }
 
     // ---- 炮兵（牵引/通用）----
@@ -267,6 +272,14 @@ class SidcRule {
       return _Arm('130101', '00', selfPropelled ? '23' : '00', '防空');
     }
 
+    // ---- 步兵战车 IFV / 装甲步兵（须在坦克之前，避免"装甲步兵"被判成坦克）----
+    if (n.contains('步兵战车') || n.contains('步战车')) {
+      return const _Arm('121105', '00', '00', '步兵战车IFV');
+    }
+    if (n.contains('装甲步兵') || n.contains('机械步兵')) {
+      return const _Arm('121102', '00', '00', '装甲机械化');
+    }
+
     // ---- 坦克/装甲 ----
     if (n.contains('坦克') ||
         n.contains('装甲') ||
@@ -280,9 +293,22 @@ class SidcRule {
 
     // ---- 自动榴弹发射器（须在步兵之前）----
     if (n.contains('АГС') || n.contains('自动榴弹')) {
-      return const _Arm('121100', '56', '00', '自动榴弹发射器');
+      return const _Arm('121100', '00', '00', '自动榴弹发射器');
     }
 
+    // ---- 反情报 / 电子战 / 雷达（须在通用侦察之前）----
+    if (n.contains('反情报')) {
+      return const _Arm('150200', '00', '00', '反情报');
+    }
+    if (n.contains('电子战')) {
+      return const _Arm('150500', '00', '00', '电子战');
+    }
+    if (n.contains('雷达')) {
+      return const _Arm('121600', '00', '00', '雷达站(监视)');
+    }
+    if (n.contains('联络')) {
+      return const _Arm('110500', '00', '00', '联络');
+    }
     // ---- 侦察 ----
     if (n.contains('侦察') || n.contains('情报') || n.contains('搜索')) {
       return const _Arm('121300', '00', '00', '侦察');
@@ -298,9 +324,19 @@ class SidcRule {
       return const _Arm('111000', '00', '00', '通信');
     }
 
-    // ---- 医疗 ----
+    // ---- 医疗/卫生（161300；站点 Medical，中国称卫生单位）----
     if (n.contains('医疗') || n.contains('卫生') || n.contains('医院')) {
-      return const _Arm('160800', '00', '00', '医疗');
+      return const _Arm('161300', '00', '00', '医疗/卫生');
+    }
+
+    // ---- 雷达站/雷达连（121600 监视；站点单位集无独立雷达码）----
+    if (n.contains('雷达')) {
+      return const _Arm('121600', '00', '00', '雷达站(监视)');
+    }
+
+    // ---- 军法署（160800；站点 Judge Advocate General）----
+    if (n.contains('军法')) {
+      return const _Arm('160800', '00', '00', '军法署');
     }
 
     // ---- 后勤/保障 ----
@@ -315,15 +351,23 @@ class SidcRule {
       return const _Arm('160000', '00', '00', '后勤保障');
     }
 
-    // ---- 海军陆战 / 步兵（兜底：编制图里最常见的兵种）----
-    if (n.contains('陆战') ||
+    // ---- 步兵类（站点语义细分）----
+    // 步兵战车 IFV → 121105；装甲/机械化 → 121102；摩托化 → 121104；其余步兵 → 121100
+    final amphibious = n.contains('陆战') || n.contains('海军');
+    if (n.contains('步兵战车') || n.contains('步战车')) {
+      return const _Arm('121105', '00', '00', '步兵战车IFV');
+    }
+    if (n.contains('装甲步兵') || n.contains('机械化') || n.contains('装甲机械')) {
+      return const _Arm('121102', '00', '00', '装甲机械化');
+    }
+    if (n.contains('摩托化')) {
+      return const _Arm('121104', '00', '00', '摩托化步兵');
+    }
+    if (amphibious ||
         n.contains('步兵') ||
-        n.contains('摩托化') ||
-        n.contains('机械化') ||
         n.contains('猎兵') ||
         n.contains('伞兵') ||
         n.contains('空降')) {
-      final amphibious = n.contains('陆战') || n.contains('海军');
       return _Arm('121100', '00', amphibious ? '60' : '00', '步兵');
     }
 
@@ -363,11 +407,11 @@ _Arm? _foreignArm(String raw) {
   }
   // 火箭炮 / 多管火箭
   if (RegExp(r'\bmlrs\b|rocket|град|ураган|смерч').hasMatch(s)) {
-    return const _Arm('130300', '41', '04', '多管火箭炮(en)');
+    return const _Arm('130300', '00', '00', '多管火箭炮(en)');
   }
   // 反坦克导弹
   if (RegExp(r'anti-?tank missile|\batgm\b|птур|конкурс|фагот|малютка').hasMatch(s)) {
-    return const _Arm('120400', '37', '00', '反坦克导弹(en)');
+    return const _Arm('120400', '00', '00', '反坦克导弹(en)');
   }
   // 反坦克（通用）
   if (RegExp(r'anti-?tank|противотанк').hasMatch(s)) {
@@ -375,12 +419,12 @@ _Arm? _foreignArm(String raw) {
   }
   // 迫击炮
   if (RegExp(r'mortar|миномёт|миномет').hasMatch(s)) {
-    return const _Arm('130800', '12', '00', '迫击炮(en)');
+    return const _Arm('130800', '00', '00', '迫击炮(en)');
   }
-  // 自行火炮
+  // 自行火炮（履带式，130301）
   if (RegExp(r'self-?propelled|самоходн').hasMatch(s) &&
       RegExp(r'artillery|gun|гаубиц|артиллер').hasMatch(s)) {
-    return const _Arm('130300', '00', '04', '自行火炮(en)');
+    return const _Arm('130301', '00', '00', '自行火炮履带(en)');
   }
   // 炮兵
   if (RegExp(r'artillery|howitzer|артиллер|гаубиц').hasMatch(s)) {
@@ -406,9 +450,17 @@ _Arm? _foreignArm(String raw) {
   if (RegExp(r'signal|communication|связ').hasMatch(s)) {
     return const _Arm('111000', '00', '00', '通信(en)');
   }
-  // 医疗
-  if (RegExp(r'medical|medical company|hospital|медицин').hasMatch(s)) {
-    return const _Arm('160800', '00', '00', '医疗(en)');
+  // 医疗/卫生（161300）
+  if (RegExp(r'medical|medical company|hospital|медицин|sanitary').hasMatch(s)) {
+    return const _Arm('161300', '00', '00', '医疗/卫生(en)');
+  }
+  // 雷达站（121600 监视）
+  if (RegExp(r'\bradar\b|радиолокац|\brtr\b').hasMatch(s)) {
+    return const _Arm('121600', '00', '00', '雷达站(en)');
+  }
+  // 军法署（160800）
+  if (RegExp(r'judge advocate|\bjag\b|военн?ый суд').hasMatch(s)) {
+    return const _Arm('160800', '00', '00', '军法署(en)');
   }
   // 后勤 / 保障
   if (RegExp(r'supply|logistic|transport|maintenance|снабж|ремонт|транспорт')
@@ -419,8 +471,20 @@ _Arm? _foreignArm(String raw) {
   if (RegExp(r'army aviation|aviation regiment|陆军航空').hasMatch(s)) {
     return const _Arm('120600', '00', '00', '陆军航空兵(en)');
   }
-  // 步兵 / 机械化 / 空降 / 陆战
-  if (RegExp(r'infantry|mechani[sz]ed|motor ?rifle|marine|airborne|paratroop|rifle|пехот|мотострелк|десант|морск')
+  // 步兵战车 IFV（站点 121105）
+  if (RegExp(r'infantry fighting vehicle|\bifv\b|\bbmp\b|marder|步兵战车').hasMatch(s)) {
+    return const _Arm('121105', '00', '00', '步兵战车IFV(en)');
+  }
+  // 装甲/机械化（履带，站点 121102）
+  if (RegExp(r'mechani[sz]ed|armoured? infantry|панцер|бронетранспорт').hasMatch(s)) {
+    return const _Arm('121102', '00', '00', '装甲机械化(en)');
+  }
+  // 摩托化步兵（站点 121104）
+  if (RegExp(r'motor ?rifle|motorized|мотострелк').hasMatch(s)) {
+    return const _Arm('121104', '00', '00', '摩托化步兵(en)');
+  }
+  // 步兵 / 空降 / 陆战（通用 121100）
+  if (RegExp(r'infantry|marine|airborne|paratroop|rifle|пехот|десант|морск')
       .hasMatch(s)) {
     final amphibious = RegExp(r'marine|морск').hasMatch(s);
     return _Arm('121100', '00', amphibious ? '60' : '00', '步兵(en)');

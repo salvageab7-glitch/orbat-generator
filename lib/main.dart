@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart' as path_provider;
 
 import 'core/logger.dart';
 import 'i18n/l10n.dart';
@@ -39,6 +40,15 @@ Future<void> main(List<String> args) async {
   } catch (_) {}
 
   WidgetsFlutterBinding.ensureInitialized();
+  // 安卓端：先确定应用私有目录，配置/日志才有可写的落点
+  if (Platform.isAndroid) {
+    try {
+      final sup = await path_provider.getApplicationSupportDirectory();
+      final cfg = Directory('${sup.path}/config');
+      if (!cfg.existsSync()) cfg.createSync(recursive: true);
+      SettingsStore.androidConfigDir = cfg;
+    } catch (_) {}
+  }
   await AppLogger.instance.init();
 
   // 单实例检查：同一时间只允许一个程序。
@@ -58,6 +68,32 @@ Future<void> main(List<String> args) async {
 
   AppLogger.instance.info('app', '应用启动 | args=$args');
   final settings = await SettingsStore.load();
+  // 安卓端：输出目录默认用「输出文件存档」，依次尝试：
+  //   1) 应用外部私有目录（文件管理器可见；部分 HyperOS/安卓11+ 返回 null）
+  //   2) 应用内部 documents 目录（稳定，只是文件管理器看不到）
+  // 都失败则保持空，由 UI 回退到 cache（ensureArchiveDir 的兜底）
+  if (Platform.isAndroid &&
+      (settings.outputDir.trim().isEmpty ||
+          settings.outputDir.contains('code_cache'))) {
+    try {
+      Directory? best;
+      try {
+        best = await path_provider.getExternalStorageDirectory();
+      } catch (_) {}
+      best ??= await path_provider.getApplicationDocumentsDirectory();
+      if (best != null) {
+        final arch = Directory('${best.path}/输出文件存档');
+        if (!arch.existsSync()) arch.createSync(recursive: true);
+        // 确认真的可写（外部目录在部分机型只读）
+        final probe = File('${arch.path}/.orbat_probe');
+        await probe.writeAsString('ok');
+        await probe.delete();
+        settings.outputDir = arch.path;
+        await settings.save();
+        AppLogger.instance.info('app', '安卓默认输出目录: ${arch.path}');
+      }
+    } catch (_) {}
+  }
   // 界面语言：'zh'/'en'，空 = 跟随系统
   L10n.apply(settings.language);
   AppLogger.instance.info(

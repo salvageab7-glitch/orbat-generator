@@ -11,12 +11,13 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../core/logger.dart';
+import '../core/secret_store.dart';
 
 class SettingsStore {
   static const _obfuscKey = 'orbat-gen-v1';
 
   /// 配置文件 schema 版本。新增字段/改语义时递增，并在 _migrate 里写迁移逻辑。
-  static const int currentConfigVersion = 4;
+  static const int currentConfigVersion = 6;
 
   /// 已知模型预设（id → 显示名）。可自由填写不在列表里的模型 id。
   static const Map<String, String> knownModels = {
@@ -57,6 +58,16 @@ class SettingsStore {
   /// 是否已跑过首次启动自检（只自动跑一次，之后可在界面手动触发）
   bool firstRunSelfCheckDone;
 
+  /// 首次启动是否已经选过使用模式（选了就不再弹模式选择）
+  bool modeChosen;
+
+  /// 首次启动是否已经选过界面语言（选过就不再弹语言选择）
+  ///
+  /// 注意与 [language] 的区别：`language` 是当前值（''=跟随系统），
+  /// 这里是"问过没有"。新装用户 language 为空且 languageChosen=false，
+  /// 启动时才会弹一次语言选择框。
+  bool languageChosen;
+
   /// 配置文件的 schema 版本（0 表示老版本、还没打版本号）
   int configVersion;
 
@@ -74,16 +85,30 @@ class SettingsStore {
     this.forceChinese = true,
     this.language = '',
     this.firstRunSelfCheckDone = false,
+    this.modeChosen = false,
+    this.languageChosen = false,
     this.configVersion = currentConfigVersion,
   });
 
-  /// 配置文件目录：%APPDATA%\OrbatGenerator（Windows）/ ~/.config/orbat（其他）
+  /// 安卓端配置目录（应用私有 support 目录下 config/）。
+  /// main() 启动时由 path_provider 初始化；null = 尚未初始化（退化到回退目录）。
+  static Directory? androidConfigDir;
+
+  /// 配置文件目录：%APPDATA%\OrbatGenerator（Windows）
+  /// / 应用私有目录 config/（Android，path_provider）
+  /// / ~/.config/orbat（其他，回退）
   static Directory get configDir {
     if (Platform.isWindows) {
       final appData = Platform.environment['APPDATA'];
       if (appData != null && appData.isNotEmpty) {
         return Directory('$appData/OrbatGenerator');
       }
+    }
+    if (Platform.isAndroid) {
+      final d = androidConfigDir;
+      if (d != null) return d;
+      // path_provider 尚未初始化时退到应用 cache（logger 也用它），至少可写
+      return Directory('${Directory.systemTemp.path}/orbat-config');
     }
     final home = Platform.environment['HOME'] ?? '.';
     return Directory('$home/.config/orbat');
@@ -103,7 +128,12 @@ class SettingsStore {
         final map = jsonDecode(await _file.readAsString()) as Map<String, dynamic>;
         // 仅当环境变量没提供 key 时才用配置文件里的
         if (store.apiKey.isEmpty) {
-          store.apiKey = _deobfuscate((map['apiKey'] ?? '').toString());
+          final raw = (map['apiKey'] ?? '').toString();
+          store.apiKey = SecretStore.open(raw);
+          if (SecretStore.isLegacy(raw)) {
+            // 老格式（固定 XOR）：本次启动内就用明文，保存时自动转 DPAPI
+            AppLogger.instance.info('secret', '检测到旧格式密钥，将在下次保存时转为 DPAPI');
+          }
         }
         store.model = (map['model'] ?? 'deepseek-flash').toString();
         final p = (map['renderScriptPath'] ?? '').toString();
@@ -123,6 +153,10 @@ class SettingsStore {
         store.language = (map['language'] ?? '').toString();
         store.firstRunSelfCheckDone =
             map['firstRunSelfCheckDone'] as bool? ?? false;
+        store.modeChosen = map['modeChosen'] as bool? ?? false;
+        // 老配置里若已明确选过语言（非空），视为"已问过"，升级后不再弹窗
+        store.languageChosen =
+            map['languageChosen'] as bool? ?? store.language.isNotEmpty;
         store.configVersion = (map['configVersion'] as num?)?.toInt() ?? 0;
 
         // schema 迁移：版本落后时在此补齐新字段默认值。
@@ -144,7 +178,7 @@ class SettingsStore {
     try {
       await configDir.create(recursive: true);
       await _file.writeAsString(jsonEncode({
-        'apiKey': _obfuscate(apiKey),
+        'apiKey': SecretStore.seal(apiKey),
         'model': model,
         'renderScriptPath': renderScriptPath,
         'lastDir': lastDir,
@@ -157,33 +191,14 @@ class SettingsStore {
         'forceChinese': forceChinese,
         'language': language,
         'firstRunSelfCheckDone': firstRunSelfCheckDone,
+        'modeChosen': modeChosen,
+        'languageChosen': languageChosen,
         'configVersion': configVersion,
       }));
     } catch (e) {
       // 写失败不阻塞使用，但一定要记录：受控环境下 AppData 可能不可写，
       // 表现为"改了设置、重启又变回去"，没有这行日志根本查不出来。
       AppLogger.instance.warn('config', '写入 config.json 失败（设置将不会保存）: $e');
-    }
-  }
-
-  /// 简单混淆：XOR + base64。目的只是防肉眼直读，不是真加密。
-  static String _obfuscate(String s) {
-    if (s.isEmpty) return '';
-    final bytes = utf8.encode(s);
-    final key = utf8.encode(_obfuscKey);
-    final out = List<int>.generate(bytes.length, (i) => bytes[i] ^ key[i % key.length]);
-    return base64.encode(out);
-  }
-
-  static String _deobfuscate(String s) {
-    if (s.isEmpty) return '';
-    try {
-      final bytes = base64.decode(s);
-      final key = utf8.encode(_obfuscKey);
-      final out = List<int>.generate(bytes.length, (i) => bytes[i] ^ key[i % key.length]);
-      return utf8.decode(out);
-    } catch (_) {
-      return '';
     }
   }
 

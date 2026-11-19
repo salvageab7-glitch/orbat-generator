@@ -518,6 +518,11 @@ class OrbatPipeline {
     return cur;
   }
 
+  /// 安卓端出图 hook：由 UI 层注册（导航到 WebView 渲染页并 await 结果）。
+  /// Windows/CLI 不注册 → 走下面的本地渲染脚本路径。
+  static Future<RenderResult> Function(
+      String normalizedJson, String outputBase)? androidRenderHook;
+
   /// 出图。[onLog] 用于把渲染脚本的每一行输出实时推给界面。
   Future<RenderResult> render(
     OrbatNode tree, {
@@ -525,6 +530,25 @@ class OrbatPipeline {
     StageCallback? onStage,
     void Function(String line)? onLog,
   }) async {
+    // 安卓：无 node/桌面浏览器，出图交给 WebView 线上渲染（方案 A）
+    if (Platform.isAndroid) {
+      final hook = androidRenderHook;
+      if (hook == null) {
+        onStage?.call('出图', '出图失败：安卓端渲染器未初始化');
+        return RenderResult(
+          ok: false,
+          error: '安卓端出图未初始化（WebView 渲染器未注册）。',
+          elapsed: Duration.zero,
+        );
+      }
+      onStage?.call('出图', '正在联网渲染（约 15-60 秒）…');
+      final result = await hook(
+          normalizeTreeJson(tree, adaptForRender: true), outputBase);
+      onStage?.call(
+          '出图', result.ok ? '出图完成' : '出图失败：${result.error}');
+      return result;
+    }
+
     final script = renderScriptPath;
     if (script == null || script.trim().isEmpty) {
       return RenderResult(
@@ -788,11 +812,10 @@ Corps→军　Army→集团军　Army Group→方面军　Theater→战区
 第二段必须是 10（陆地）或 01（空中），第三段必须是 00。漏写这两段会让整串左移 4 位。
 
 梯队：14排 15连 16营 17团 18旅 21师 22军 23集团军
-主实体：110000司令部 121100步兵 121104步兵战车 120500装甲 120400反坦克
-　　　　130300炮兵 130301自行炮 130800迫击炮 130100防空 130101高炮 121300侦察
-　　　　140700工兵 160000勤务支援 160800医疗 111000通信 120600陆军航空兵
-类型：00默认 12=60mm 14=120mm 37反坦克武器 41多管火箭炮 56榴弹发射器
-机动：00徒步 04履带/自行 05轮式 06轮式装甲 23便携防空 60两栖
+主实体：110000司令部 121100步兵 121105步兵战车 121102装甲机械化 121104摩托化 120500装甲 120400反坦克
+　　　　130300炮兵(通用) 130301自行火炮履带 130800迫击炮 130100防空 130101高炮 121300侦察 121600雷达站
+　　　　140700工兵 160000勤务支援 161300医疗/卫生 160800军法署 150500电子战 110500联络 111000通信 120600陆军航空兵
+修饰位全部禁用：主实体6位之后的14位（类型2+机动2+扇区2+保留8）一律全0，不写任何小标志；载具/口径等细节靠名称表达。例：摩托化步兵=...121104 00 00 00...、自行火炮=...130301 00 00 00...、火箭炮=...130300 00 00 00...
 
 # 输出格式
 严格按三段输出，顺序不可变，不要输出其他内容：
