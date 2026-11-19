@@ -23,6 +23,7 @@ import '../core/self_check.dart';
 import '../pipeline.dart';
 import '../ai/deepseek_client.dart';
 import '../render/renderer.dart';
+import '../services/plugin_bridge.dart';
 import '../services/settings_store.dart';
 import 'render_webview_page.dart';
 import 'tree_view.dart';
@@ -858,6 +859,82 @@ class _HomePageState extends State<HomePage> {
     final d = widget.settings.outputDir.trim();
     if (d.isNotEmpty && ensureDirExists(d)) return d;
     return ensureArchiveDir();
+  }
+
+  /// 插件交接模式（安卓端 Agent 外挂）：
+  /// Agent 把编制 JSON 放 Download/orbat_inbox/ → 这里一键批量
+  /// 校验 + 出图 → 产物与报告写 orbat_outbox/ → Agent 取走结果。
+  Future<void> _runPluginBridge() async {
+    if (!Platform.isAndroid) return;
+    const channel = MethodChannel('orbat/storage');
+    bool granted = false;
+    try {
+      granted =
+          await channel.invokeMethod<bool>('isManageStorageGranted') ?? false;
+    } catch (_) {}
+    if (!granted) {
+      try {
+        await channel.invokeMethod('requestManageStorage');
+      } catch (_) {}
+      _snack(tr('请在系统设置允许「所有文件访问」后，返回再点一次「插件处理」'));
+      return;
+    }
+    PluginBridge.ensureDirs();
+    final files = PluginBridge.scanInbox();
+    if (files.isEmpty) {
+      _snack(tf('交接目录没有待处理 JSON：{p}', {'p': PluginBridge.inboxDir}));
+      return;
+    }
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _stage = tf('插件处理中：{n} 个文件', {'n': files.length});
+    });
+    final pipeline = OrbatPipeline(
+      apiKey: widget.settings.apiKey,
+      renderScriptPath: widget.settings.renderScriptPath,
+      whiteBackground: widget.settings.whiteBackground,
+      forceChinese: widget.settings.forceChinese,
+    );
+    int okCount = 0;
+    int renderOk = 0;
+    try {
+      for (final f in files) {
+        final r = await PluginBridge.processOne(f,
+            (nj, ob) => pipeline.render(parseTreeJson(nj)!, outputBase: ob));
+        if (r['ok'] == true) okCount++;
+        if (r['render']['ok'] == true) renderOk++;
+        _appendLog(tf('插件处理 {f}：校验{v}，出图{g}', {
+          'f': r['file'],
+          'v': r['ok'] == true
+              ? tr('通过（红牌 0）')
+              : '${tr('红牌')} ${(r['red'] as List).length}',
+          'g': r['render']['ok'] == true ? tr('成功') : tr('失败'),
+        }));
+      }
+      _snack(tf('插件处理完成：{n} 个，校验通过 {ok}，出图成功 {g}，产物在 orbat_outbox', {
+        'n': files.length,
+        'ok': okCount,
+        'g': renderOk,
+      }));
+    } catch (e) {
+      _appendLog('插件处理异常：$e');
+      _snack('插件处理异常：$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// 导出 Agent 工作流提示词到 Download/orbat_docs/（模式三 · 安卓端）
+  Future<void> _exportAgentPrompts() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final path = await PluginBridge.exportPrompts();
+      _snack(tf('提示词已导出：{p}', {'p': path}));
+      _appendLog('Agent 提示词已导出：$path');
+    } catch (e) {
+      _snack('导出失败：$e');
+    }
   }
 
   Future<void> _exportJson() async {
@@ -1900,6 +1977,12 @@ class _HomePageState extends State<HomePage> {
           tooltip: tr('更多功能'),
           onSelected: (v) {
             switch (v) {
+              case 'plugin':
+                _runPluginBridge();
+                break;
+              case 'prompts':
+                _exportAgentPrompts();
+                break;
               case 'image':
                 _pickImage();
                 break;
@@ -1924,6 +2007,24 @@ class _HomePageState extends State<HomePage> {
             }
           },
           itemBuilder: (_) => [
+            PopupMenuItem(
+                value: 'plugin',
+                child: ListTile(
+                  leading: Icon(Icons.extension_outlined, size: 20),
+                  title: Text(tr('插件处理 · Agent 交接'),
+                      style: TextStyle(fontSize: 14)),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                )),
+            PopupMenuItem(
+                value: 'prompts',
+                child: ListTile(
+                  leading: Icon(Icons.description_outlined, size: 20),
+                  title: Text(tr('导出 Agent 提示词'),
+                      style: TextStyle(fontSize: 14)),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                )),
             PopupMenuItem(
                 value: 'image',
                 child: ListTile(
