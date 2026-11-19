@@ -131,6 +131,12 @@ class PluginBridge {
         .writeAsString(jsonEncode(report), flush: true);
   }
 
+  /// 批处理状态信号文件（Agent 轮询 orbat_outbox/_status.json 判定完成）
+  static Future<void> writeStatus(Map<String, dynamic> status) async {
+    await File('$outboxDir/_status.json')
+        .writeAsString(jsonEncode(status), flush: true);
+  }
+
   /// 导出 Agent 工作流提示词到 orbat_docs/（对应 Windows 模式三 `prompts` 命令）
   static Future<String> exportPrompts() async {
     ensureDirs();

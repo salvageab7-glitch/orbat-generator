@@ -1,111 +1,140 @@
-# 安卓端 Agent 插件指导 —— 把「编制生成器」当外挂插件用
+# 安卓端 Agent 插件指导 v2 —— 把「编制生成器」当外挂插件用
 
-> 写给手机本机运行的外部 Agent：你（Agent）负责读资料、得出编制描述、生成编制 JSON；
-> 「编制生成器」App（orbat_core）负责**本地校验 + 出图（PNG/SVG）**。
-> 你与 App 之间通过公共 Download 下的**固定交接目录**交换文件，全程无需人工干预
-> （首次使用需人工授权一次「所有文件访问」）。
+> 写给手机本机运行的外部 Agent。你负责读资料、形成编制描述、生成编制 JSON；
+> 「编制生成器」App（com.orbat.orbat_core）负责本地校验 + 出图（PNG/SVG）。
+> 本版已按手机端 Agent 实测反馈修订：JSON 结构、SIDC 位段、触发方式、
+> 完成判定、交接细节全部以 App 实际实现为准。
 
 ---
 
-## 一、目录协议（固定，不可更改）
+## 〇、先行勘误（v1 文档的错，以此版为准）
+
+1. **JSON 结构**：正确结构是 `options{...}` + `subOrganizations[]` + 根节点 `commandLevels`。
+   v1 写的 `name/sidc/children` **是错的**——App 不认 `children`，写了会解析失败。
+2. **"7 键"** 指 `options` 里的 7 个键（见二节），不是节点总数。
+3. **SIDC"14 位全 0"** 指主实体之后（1-based 第 17~30 位）；
+   **梯队（9~10 位）本来就可以非零**，v1 没写位段表导致误读。
+
+## 一、目录协议（固定）
 
 ```
 /storage/emulated/0/Download/
-├── orbat_inbox/          ← 你把编制 JSON 放这里（App 处理完会把源文件移入 done/）
-│   └── done/             ← 已处理归档
-├── orbat_outbox/         ← App 把产物写到这里（你从这里取结果）
-└── orbat_docs/           ← App 导出的 Agent 提示词（agent_prompts.txt）
+├── orbat_inbox/          ← 你把编制 JSON 放这里（处理后移入 done/）
+│   └── done/
+├── orbat_outbox/         ← App 产物与报告（你从这里取）
+│   └── _status.json      ← 批处理状态信号（轮询判定完成）
+└── orbat_docs/           ← SIDC 权威对照表.md + agent_prompts.txt（已就位）
 ```
 
-| 文件 | 说明 |
-|---|---|
-| `<名>.json`（你写入 inbox） | 编制树 JSON，结构见第三节 |
-| `<名>.normalized.json`（outbox） | App 按 7 键规范归一化后的 JSON（渲染器要求的标准形） |
-| `<名>.report.json`（outbox） | **校验报告**：红牌/警告/出图结果（见第四节） |
-| `<名>.png` / `<名>.svg`（outbox） | 出图产物（PNG 为 2x 白底，SVG 为矢量） |
-
-## 二、你的工作流（自修复循环）
-
-```
-1. 读用户资料 → 形成明确的编制描述（层级、番号、兵种、注释）
-2. 按第三节规范生成编制 JSON（含 7 键 options）
-3. 把 JSON 写入 orbat_inbox/<名>.json
-4. 打开 App → 顶栏 ⋮ 更多 → 「插件处理 · Agent 交接」
-   （App 自动逐个：归一化 → 校验 → 出图；处理中会弹出渲染页，勿离开应用）
-5. 读 orbat_outbox/<名>.report.json：
-   - red 非空 → 修正 JSON → 回到第 3 步（自修复循环）
-   - red 空 → 校验通过，PNG/SVG 已产出，交付用户
-6. 「导出 Agent 提示词」可在 orbat_docs/agent_prompts.txt 取得完整
-   SIDC 规范与识图工作流提示词（交给你的模型用）
-```
-
-注意：
-- 第 4 步是**用户/你触发的一次批处理**：一次点按处理 inbox 里全部 JSON。
-- 处理过程中 App 会弹全屏渲染页（联网渲染 15~60 秒/个），**期间不要离开应用**，
-  否则该文件的报告会记为"出图被取消"（产物可能仍已写出，建议重跑确认）。
-- 已存在的同名产物会被覆盖。
-
-## 三、编制 JSON 规范（核心要点）
+## 二、编制 JSON 规范（唯一正确结构）
 
 ```json
 {
-  "name": "第5合成师",
-  "sidc": "130310001512110000000000000000",
-  "children": [
-    { "name": "第1合成营", "sidc": "...", "children": [] }
-  ],
   "options": {
-    "sidc": "...（同上，30 位）",
+    "sidc": "130310001512110000000000000000",
     "uniqueDesignation": "第5合成师",
-    "additionalInformation": "注释 ≤12 汉字 / ≤20 字母",
-    "dashed": false,
-    "showMapLabels": true,
-    "commandLevels": "1",
-    "actorType": ""
-  }
+    "additionalInformation": "注释不超过12个汉字"
+  },
+  "commandLevels": "1",
+  "subOrganizations": [
+    { "options": { "sidc": "...", "uniqueDesignation": "第1合成营", "additionalInformation": "" },
+      "subOrganizations": [] }
+  ]
 }
 ```
 
-硬规则（违反 = 红牌，校验不过）：
-- **SIDC 必须 30 位**，且主实体 6 位之后的 14 位（类型 2+机动 2+扇区 2+保留 8）**必须全 0**（禁用一切小标志）
-- `uniqueDesignation`（称号）里**不能有空格+左括号**（渲染器会卡死），如 `某连 (测试)` ✗
-- `additionalInformation`（注释）≤ 12 汉字 / ≤ 20 字母，**不含**空格+括号、指挥官姓名（师长XXX）、自检说明
-- 根节点才可有 `commandLevels`；子节点不带
-- 兄弟节点称号不得重复；`110000`（HQ）加机动修饰 98 会被拦
-- 层级建议 ≤3、单父直属下属 ≤10（超出为软警告，不拦截）
+- `options` 三键必填：`sidc`（30 位）、`uniqueDesignation`（称号）、`additionalInformation`（注释，可为空串）
+- `commandLevels` **只出现在根节点**（"1"=指挥层级缩进一级），子节点不带
+- 其余键（dashed/outline/plain-text-mode/showMapLabels）App 会自动补全，**你不需要写**
+- **不要用** `name` / `sidc` 顶层键、`children`——都不被解析
 
-完整 SIDC 语义与实体码表：`orbat_docs/agent_prompts.txt`（先点「导出 Agent 提示词」）
-与仓库 `docs/SIDC权威对照表.md`。
+硬规则（红牌，必须修）：
 
-## 四、报告格式（`<名>.report.json`）
+| 规则 | 说明 |
+|---|---|
+| SIDC 必须 30 位纯数字 | 位数错 = 红 |
+| 位 1-2 = `13` | 版本位 |
+| 位 3-4 = `03` | 上下文 |
+| 位 5-6 = `10`（陆地）或 `01`（空中） | 符号集 |
+| 位 7-8 = `00` | 状态 |
+| 位 9-10 = 梯队码 | **可非零**，取值见下表；`19/20` 禁用 |
+| 位 23-30 = `00000000` | 保留位，非零 = 红 |
+| `uniqueDesignation` 不能含「空格+左括号」 | 渲染器会卡死 |
+| 注释 ≤12 汉字 / ≤20 字母，不含空格+括号、指挥官姓名 | 超长 = 红 |
+
+**梯队码表（位 9-10）**：`11`组/车组 `12`班 `13`小队 `14`排 `15`连 `16`营 `17`团/群 `18`旅 `21`师 `22`军 `23`集团军 `24`方面军 `25`军区 `26`总指挥部，`00`=未指定。
+
+**SIDC 位段示例**：`130310001512110000000000000000`
+= 版本13 + 上下文03 + 陆地10 + 状态00 + **梯队15（连）** + **主实体121100（步兵）** + 修饰000000 + 保留00000000。
+你观察到的"第 15 位 01/02/04/05"是主实体码的组成部分（步兵系细分），**合法**。
+
+软规则（warn，不拦截但建议遵守）：
+- 位 17-22（类型/机动/扇区修饰）应 `000000`——非零仍可出图，但新规范要求载具/口径细节写进称号
+- 主实体 6 位须在符号集标准表中（全表见 `orbat_docs/SIDC权威对照表.md`）
+- 兄弟节点称号不重复；根直属下属 ≤10；树深 ≤3；父子梯队不倒挂
+
+## 三、触发方式（两种，任选）
+
+**方式 A：intent 直接触发（推荐，免人工点界面）**
+```bash
+am start -a com.orbat.orbat_core.plugin.RUN
+```
+- App 未运行会自动拉起并开始处理；已运行则热触发
+- 兼容：App 冷启动时收到的 intent 会在界面就绪后自动执行（约 1~2 秒延迟）
+- 处理过程中 App 会弹全屏渲染页（每个文件 15~60 秒，联网渲染），
+  **期间不要把 App 切到后台**——切走会中断当前文件（报告记"出图被取消"，产物可能已写出但不可靠，建议重跑该文件）
+
+**方式 B：UI 触发（备用）**
+打开 App → 顶栏 `⋮更多` → 「插件处理 · Agent 交接」。
+读屏/无障碍操作不算"离开应用"；只要 App 保持前台即可。
+
+## 四、完成判定（轮询 `_status.json`）
+
+处理开始后 App 会在 `orbat_outbox/_status.json` 写状态：
+```json
+{"state":"running","total":2,"done":1,"current":"test3"}
+{"state":"idle","lastRun":{"total":2,"validated":2,"rendered":2,"finishedAt":"..."}}
+```
+- 建议 5~10 秒轮询一次；`state=idle` 即完成
+- `validated` = 红牌 0 的文件数；`rendered` = 出图成功数
+- 每个文件的明细看 `orbat_outbox/<名>.report.json`（第五节）
+
+## 五、报告明细（`<名>.report.json`）
 
 ```json
 {
-  "file": "test",
-  "ok": true,                    // 校验是否全绿（红牌 0）
-  "nodeCount": 25, "depth": 4,
-  "red":  [],                    // 红牌：[{path, message}] —— 必须修复后重交
-  "warn": [{"path":"根","message":"..."}],   // 软警告：可忽略
-  "render": { "ok": true,        // 出图是否成功
-              "png": "...orbat_outbox/test.png",
-              "svg":  "...orbat_outbox/test.svg" }
+  "file": "test2", "ok": true, "nodeCount": 25, "depth": 4,
+  "red": [], "warn": [ ... ],
+  "render": {"ok": true, "png": "...orbat_outbox/test2.png", "svg": "...test2.svg"}
 }
 ```
+- `ok=true` 且 `render.ok=true` → 完成
+- `render.ok=false` 且 error 含「被取消」→ 处理中 App 被切走，重放该 JSON 再触发即可
+- 只有 `error` 字段（无 red/render）→ JSON 结构无法解析，对照第二节检查
 
-- `ok=true` 且 `render.ok=true` → 流程完成，产物就绪
-- `render.ok=false` 且 error 含"被取消" → 处理时离开了应用，重放该 JSON 再跑一次
-- `error` 字段出现（无 red/render 键）→ JSON 结构无法解析，检查是否符合第三节
+## 六、交接细节
 
-## 五、首次使用（一次性人工设置）
+| 事项 | 约定 |
+|---|---|
+| 文件名 | 中文可；建议不含空格/引号/斜杠；产物沿用同名主干 |
+| 子目录 | 不扫描——只处理 `orbat_inbox/` 根一级的 `.json` |
+| 写入原子性 | 先写 `<名>.json.tmp` 再 rename 成 `.json`，避免 App 扫到半截文件 |
+| 同名覆盖 | outbox 同名产物直接覆盖；需要区分批次就换文件名（如 `xxx_v2.json`） |
+| 源文件去向 | 处理完自动移入 `orbat_inbox/done/` |
+| 批量 | inbox 里所有 `.json` 按文件名顺序逐个处理，一个 intent 全跑完 |
 
-1. 手机安装 orbat_core（debug APK，随 Release 附带或侧载）
-2. 首启选界面语言 → 选**模式三 · Agent 插件**（无需 API Key）
-3. 顶栏 ⋮ 更多 → 「插件处理 · Agent 交接」→ 按提示在系统设置里
-   **允许「所有文件访问」**→ 返回应用
-4. 再点一次「插件处理」即可开始（之后无需再授权）
+## 七、产物交付
 
-## 六、能力边界（本期）
+产物**留在 `orbat_outbox/`**（权威位置）。需要放进 `DSH-Go/` 等其他目录时由你自行复制，App 不搬运。
 
-- 仅支持「JSON 校验 + 出图」；**AI 识图生成**（模式一）在手机端暂由 Agent 侧模型承担
-- 交接目录固定在公共 Download 下；App 需要「所有文件访问」权限
-- 批量处理按文件名顺序逐个执行；出图依赖网络（spatialillusions.com）
+## 八、码表与提示词（已就位）
+
+- `orbat_docs/SIDC权威对照表.md` —— 陆上 214 / 空中 53 实体码 + 梯队 15 档，全量语义
+- `orbat_docs/agent_prompts.txt` —— 完整 SIDC 规范提示词（交给你的模型）+ 识图三段式工作流
+- App 内「⋮更多 → 导出 Agent 提示词」可随时重新导出
+
+## 九、能力边界
+
+- 你承担资料读取与 JSON 生成；App 只做校验 + 出图
+- 出图依赖网络（spatialillusions.com）
+- 首次使用需人工授权一次「所有文件访问」（App 内引导）

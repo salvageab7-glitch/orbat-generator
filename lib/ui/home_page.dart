@@ -225,6 +225,26 @@ class _HomePageState extends State<HomePage> {
         return result ??
             RenderResult(ok: false, error: '出图被取消', elapsed: Duration.zero);
       };
+      // 插件交接：Agent 可用 intent 直接触发批处理
+      //   am start -a com.orbat.orbat_core.plugin.RUN
+      const pluginChannel = MethodChannel('orbat/storage');
+      pluginChannel.setMethodCallHandler((call) async {
+        if (call.method == 'pluginRun') {
+          // 先切回主界面（渲染页可能还压在栈顶）
+          if (mounted && Navigator.of(context).canPop()) {
+            Navigator.of(context).popUntil((r) => r.isFirst);
+          }
+          await _runPluginBridge();
+        }
+      });
+      // 冷启动时 intent 先于 Dart 到达：向原生拉取挂起的触发
+      Timer(const Duration(milliseconds: 1200), () async {
+        try {
+          final pending =
+              await pluginChannel.invokeMethod<bool>('consumePendingRun');
+          if (pending == true) await _runPluginBridge();
+        } catch (_) {}
+      });
     }
     // 命令行直接识图：`启动.exe 图.png --generate`
     final img = widget.initialImagePath;
@@ -898,12 +918,27 @@ class _HomePageState extends State<HomePage> {
     );
     int okCount = 0;
     int renderOk = 0;
+    // 状态信号：Agent 轮询 _status.json 判定开始/进度/完成
+    await PluginBridge.writeStatus({
+      'state': 'running',
+      'total': files.length,
+      'done': 0,
+      'startedAt': DateTime.now().toIso8601String(),
+    });
     try {
+      var done = 0;
       for (final f in files) {
         final r = await PluginBridge.processOne(f,
             (nj, ob) => pipeline.render(parseTreeJson(nj)!, outputBase: ob));
+        done++;
         if (r['ok'] == true) okCount++;
         if (r['render']['ok'] == true) renderOk++;
+        await PluginBridge.writeStatus({
+          'state': 'running',
+          'total': files.length,
+          'done': done,
+          'current': r['file'],
+        });
         _appendLog(tf('插件处理 {f}：校验{v}，出图{g}', {
           'f': r['file'],
           'v': r['ok'] == true
@@ -917,6 +952,15 @@ class _HomePageState extends State<HomePage> {
         'ok': okCount,
         'g': renderOk,
       }));
+      await PluginBridge.writeStatus({
+        'state': 'idle',
+        'lastRun': {
+          'total': files.length,
+          'validated': okCount,
+          'rendered': renderOk,
+          'finishedAt': DateTime.now().toIso8601String(),
+        },
+      });
     } catch (e) {
       _appendLog('插件处理异常：$e');
       _snack('插件处理异常：$e');

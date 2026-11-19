@@ -9,43 +9,65 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
-/// 插件交接模式（安卓端 Agent 外挂）用的存储授权通道：
-/// - isManageStorageGranted：是否已获「所有文件访问」权限
-/// - requestManageStorage：跳系统授权页（用户点一次允许即可）
-/// 有该权限后，App 可直接读写公共 Download 下的交接目录，
-/// 手机本机 Agent 写入的 JSON 才能被读取。
+/// 插件交接模式（安卓端 Agent 外挂）：
+/// - orbat/storage 通道：
+///   · isManageStorageGranted / requestManageStorage：所有文件访问授权
+///   · consumePendingRun：Dart 就绪后取走「App 未就绪时收到的触发」
+/// - Agent 可用 intent 直接触发批处理，无需人工点界面：
+///   am start -a com.orbat.orbat_core.plugin.RUN
 class MainActivity : FlutterActivity() {
     private val channelName = "orbat/storage"
+    private var channel: MethodChannel? = null
+    private var pendingPluginRun = false
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-            .setMethodCallHandler { call, result ->
-                when (call.method) {
-                    "isManageStorageGranted" -> {
-                        result.success(
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
-                                Environment.isExternalStorageManager()
-                            else true
-                        )
-                    }
-                    "requestManageStorage" -> {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                            try {
-                                val intent = Intent(
-                                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                                    Uri.parse("package:$packageName")
-                                )
-                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                startActivity(intent)
-                                result.success(true)
-                            } catch (e: Exception) {
-                                result.error("INTENT", e.message, null)
-                            }
-                        } else result.success(true)
-                    }
-                    else -> result.notImplemented()
+        channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        channel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "isManageStorageGranted" -> {
+                    result.success(
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+                            Environment.isExternalStorageManager()
+                        else true
+                    )
                 }
+                "requestManageStorage" -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        try {
+                            val intent = Intent(
+                                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                Uri.parse("package:$packageName")
+                            )
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            startActivity(intent)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("INTENT", e.message, null)
+                        }
+                    } else result.success(true)
+                }
+                "consumePendingRun" -> {
+                    result.success(pendingPluginRun)
+                    pendingPluginRun = false
+                }
+                else -> result.notImplemented()
             }
+        }
+        // 冷启动自带触发 intent：Dart 尚未就绪，先记下，等 Dart 拉取
+        if (intent?.action == PluginRunAction) pendingPluginRun = true
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == PluginRunAction) {
+            // 热触发：Dart 已就绪，直接通知；未就绪则挂起
+            channel?.invokeMethod("pluginRun", null)
+                ?: run { pendingPluginRun = true }
+        }
+    }
+
+    companion object {
+        const val PluginRunAction = "com.orbat.orbat_core.plugin.RUN"
     }
 }
