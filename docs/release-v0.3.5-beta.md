@@ -12,7 +12,7 @@
 - **首次启动向导**：选界面语言 → 选使用模式（三模式），模式三（Agent 插件）全程零 API Key
 - **内置中英双语教程**：菜单内直接打开，随界面语言切换
 - **模式三 Agent 文档**：随包附《MODE3-AGENT-QUICKSTART》（中英），外部 Agent 接入零门槛
-- **安卓端源码就绪**：窄屏 UI、WebView 线上渲染出图已实现，正式发布待后续版本
+- **安卓端插件交接（实机验证）**：`am start -a com.orbat.orbat_core.plugin.RUN` 或直接打开 App 即自动处理交接目录；`orbat_outbox/_status.json` 状态信号；窄屏 UI 全面适配；**单实例**（再次点图标回到原界面）
 
 ## 下载
 
@@ -21,6 +21,7 @@
 | `orbat-generator-v0.3.5-beta-full-setup.exe` | **完整版安装器**（推荐）：内置 node.exe，免装 Node.js，自动装 VC++ 运行库 |
 | `orbat-generator-v0.3.5-beta-lite-setup.exe` | 精简版安装器：体积小，出图需自装 Node.js ≥ 24 |
 | `orbat-generator-v0.3.5-beta-portable.zip` | 便携版：解压即用，含 node.exe，免安装 |
+| `orbat-generator-v0.3.5-beta-android-debug.apk` | **安卓端（实验性）**：debug 签名；插件交接模式（Agent 放 JSON → App 校验出图），用法见随包《安卓端Agent插件指导.md》；模式二不支持，正式签名待后续版本 |
 
 ## 环境要求
 
