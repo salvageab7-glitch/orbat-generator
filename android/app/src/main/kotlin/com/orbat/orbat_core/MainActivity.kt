@@ -54,8 +54,13 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
-        // 冷启动自带触发 intent：Dart 尚未就绪，先记下，等 Dart 拉取
-        if (intent?.action == PluginRunAction) pendingPluginRun = true
+        // 冷启动自带触发 intent：Dart 尚未就绪，先记下，等 Dart 拉取。
+        // 检查后立即清掉 action——避免 Activity 记录里残留 RUN intent，
+        // 导致之后普通点图标冷启动也被误判为插件触发。
+        if (intent?.action == PluginRunAction) {
+            pendingPluginRun = true
+            intent.action = Intent.ACTION_MAIN
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

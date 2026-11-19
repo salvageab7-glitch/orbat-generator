@@ -11,11 +11,16 @@ class OrbatNode {
   final String sidc; // 30 位
   final List<OrbatNode> children;
 
+  /// 根节点的指挥层级设置（"1"~"4"；仅根节点有值，子节点恒为空串）
+  /// 规范：优先 "3"；出图过宽可 "2"；禁用 "1"/"4"（归一化时强制归 "3"）
+  final String commandLevels;
+
   OrbatNode({
     required this.uniqueDesignation,
     required this.additionalInformation,
     required this.sidc,
     List<OrbatNode>? children,
+    this.commandLevels = '',
   }) : children = children ?? <OrbatNode>[];
 
   /// 从渲染器/AI 产出的 JSON 解析
@@ -28,6 +33,7 @@ class OrbatNode {
       uniqueDesignation: (opts['uniqueDesignation'] ?? '').toString(),
       additionalInformation: (opts['additionalInformation'] ?? '').toString(),
       sidc: (opts['sidc'] ?? '').toString(),
+      commandLevels: (json['commandLevels'] ?? '').toString(),
       children: subs
           .whereType<Map>()
           .map((s) => OrbatNode.fromJson(Map<String, dynamic>.from(s)))

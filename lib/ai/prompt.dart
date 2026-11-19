@@ -10,7 +10,7 @@ const String kOrbatSystemPrompt = r'''
 {
   "options": {
     "uniqueDesignation": "单位中文名",
-    "additionalInformation": "注释，≤24个汉字",
+    "additionalInformation": "注释，≤12个汉字",
     "sidc": "30位数字SIDC码"
   },
   "subOrganizations": [ /* 子节点，同结构 */ ],
@@ -90,7 +90,7 @@ SIDC 硬规则：
 1. 编号单位逐个列出，严禁合并：带番号/序号的单位（第1营、A连、坦克连B）各建一个独立节点，不许写"×N"合并。拿不准就分开列。
 2. 同构无编号的重复单位才用 ×N（如三个同名步枪班）。
 3. 节点总数控制在 20~80 之间。
-4. 注释 additionalInformation ≤24 个汉字，只写单位职能短名或驻地，禁止写指挥官姓名、禁止写长句装备明细。
+4. 注释 additionalInformation ≤12 个汉字，只写单位职能短名或驻地，禁止写指挥官姓名、禁止写长句装备明细。
 5. uniqueDesignation 禁止"空格+左括号"写法（如"旅部及旅部连 (HHC)"会导致渲染器卡死）。括号要紧贴中文写"旅部及旅部连(HHC)"，或用·分隔。
 6. 名称与 SIDC 的梯队码必须自洽：名字里的师/旅/营/连/排要和梯队码对应。
 7. additionalInformation 是**纯数据字段**：严禁把自检说明、质量备注（如"名称被裁切""符号不清""待确认"）写进去——此类说明只允许出现在最后的自检段里。

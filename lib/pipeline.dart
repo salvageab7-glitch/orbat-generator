@@ -543,7 +543,10 @@ class OrbatPipeline {
       }
       onStage?.call('出图', '正在联网渲染（约 15-60 秒）…');
       final result = await hook(
-          normalizeTreeJson(tree, adaptForRender: true), outputBase);
+          normalizeTreeJson(tree,
+              commandLevels: _resolveCommandLevels(tree),
+              adaptForRender: true),
+          outputBase);
       onStage?.call(
           '出图', result.ok ? '出图完成' : '出图失败：${result.error}');
       return result;
@@ -564,7 +567,8 @@ class OrbatPipeline {
       ));
     final result = await renderer.render(
       // 只有送渲染器这一步才做名称长度适配；导出/保存的 JSON 保持原文
-      normalizedJson: normalizeTreeJson(tree, adaptForRender: true),
+      normalizedJson: normalizeTreeJson(tree,
+          commandLevels: _resolveCommandLevels(tree), adaptForRender: true),
       outputBase: outputBase,
       onLog: onLog,
     );
@@ -592,6 +596,14 @@ class OrbatPipeline {
 /// 设 2 时，只有下属超过 8 个的分支才会纵向排列，2-3 个下属的分支一律横向铺开，
 /// 导致同一张图里有的分支竖着、有的横着，观感参差；
 /// 设 3 时全部按纵向展开，图也更紧凑（同一张法国团级图宽度从 3331 降到 1448）。
+/// commandLevels 解析（2026-11-19 用户规范）：
+/// 优先 3 级；出图过宽可 2；**禁用 1 和 4**。
+/// 输入 JSON 根节点写了 "2" 就尊重；写了 "1"/"4" 或没写 → 归 "3"。
+String _resolveCommandLevels(OrbatNode tree) {
+  final raw = tree.commandLevels.trim();
+  return raw == '2' ? '2' : '3';
+}
+
 String normalizeTreeJson(OrbatNode tree,
     {String commandLevels = '3', bool adaptForRender = false}) {
   return const JsonEncoder.withIndent('  ').convert(normalizeTree(tree,

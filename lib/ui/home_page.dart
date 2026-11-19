@@ -242,8 +242,23 @@ class _HomePageState extends State<HomePage> {
         try {
           final pending =
               await pluginChannel.invokeMethod<bool>('consumePendingRun');
-          if (pending == true) await _runPluginBridge();
+          if (pending == true) {
+            await _runPluginBridge();
+            return;
+          }
         } catch (_) {}
+        // 确定性的「打开即处理」：不依赖 intent 残留——只要权限已授且
+        // 交接目录有待处理 JSON，打开 App 就自动跑批（手机端 Agent 主路径）
+        Timer(const Duration(milliseconds: 800), () async {
+          if (!mounted || _busy) return;
+          try {
+            final granted =
+                await pluginChannel.invokeMethod<bool>('isManageStorageGranted');
+            if (granted != true) return;
+            PluginBridge.ensureDirs();
+            if (PluginBridge.scanInbox().isNotEmpty) await _runPluginBridge();
+          } catch (_) {}
+        });
       });
     }
     // 命令行直接识图：`启动.exe 图.png --generate`
