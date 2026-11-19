@@ -76,6 +76,13 @@ Directory get appDataDir {
       return Directory('$appData/OrbatGenerator');
     }
   }
+  // 安卓：systemTemp = <数据根>/cache，反推数据根落 files/（稳定，code_cache 会被清理）
+  if (Platform.isAndroid) {
+    try {
+      final dataRoot = Directory(Directory.systemTemp.path).parent.path;
+      return Directory('$dataRoot/files/OrbatGenerator');
+    } catch (_) {}
+  }
   final home = Platform.environment['HOME'] ?? '.';
   return Directory('$home/.config/orbat');
 }
@@ -86,9 +93,11 @@ Directory get appDataDir {
 /// 全部不可写时返回 null（调用方据此给出明确提示，而不是崩溃）。
 Future<Directory?> resolveWritableDir() async {
   final exeDir = File(Platform.resolvedExecutable).parent.path;
+  final androidFirst = Platform.isAndroid; // 安卓：files/ 优先于 code_cache
   final candidates = <String>[
+    if (androidFirst) '${appDataDir.path}/tmp',
     Directory.systemTemp.path,
-    '${appDataDir.path}/tmp',
+    if (!androidFirst) '${appDataDir.path}/tmp',
     Directory.current.path,
     '$exeDir/tmp',
   ];

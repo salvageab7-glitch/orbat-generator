@@ -46,6 +46,7 @@ class SelfCheck {
     String? apiKey,
     bool smokeRender = false,
     String? outputDir,
+    int? mode,
   }) async {
     final items = <CheckItem>[];
     final log = AppLogger.instance;
@@ -141,12 +142,17 @@ class SelfCheck {
     }
 
     // ---------- 4. API Key ----------
+    // 模式三（Agent 全权）不需要软件 API：列为可选提示而非失败项
     final key = apiKey?.trim() ?? '';
+    final keyOptional = mode == 2 || isAndroid && mode == null;
     items.add(CheckItem(
       name: tr('API Key'),
       ok: key.isNotEmpty,
-      detail: key.isEmpty ? '未配置' : AppLogger.keyFingerprint(key),
-      fix: key.isEmpty ? '在设置里填入 DeepSeek API Key' : null,
+      optional: keyOptional,
+      detail: key.isEmpty
+          ? (keyOptional ? '未配置（当前模式不需要）' : '未配置')
+          : AppLogger.keyFingerprint(key),
+      fix: key.isEmpty && !keyOptional ? '在设置里填入 DeepSeek API Key' : null,
     ));
 
     // ---------- 5. 目录可写 ----------

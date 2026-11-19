@@ -1398,6 +1398,7 @@ class _HomePageState extends State<HomePage> {
         // 真渲染一次（约 15-25 秒）：把"能不能出图"从猜测变成结论
         smokeRender: true,
         outputDir: outputDir,
+        mode: widget.settings.mode,
       );
     } catch (e) {
       _snack('自检失败：$e');
@@ -1506,17 +1507,25 @@ class _HomePageState extends State<HomePage> {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDlgState) => AlertDialog(
           title: Text(tr('设置')),
-          content: SizedBox(
-            width: _dialogW(520),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
+          content: ConstrainedBox(
+            // 手机竖屏：内容总高超过屏幕（此前 BOTTOM OVERFLOWED 207px）→
+            // 限高 72% + 可滚动；宽度仍用 _dialogW
+            constraints: BoxConstraints(
+              maxWidth: _dialogW(520),
+              maxHeight: MediaQuery.of(context).size.height * 0.72,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
                 DropdownButtonFormField<int>(
                   initialValue: modeVal,
+                  isExpanded: true, // 手机窄屏：长选项文本右溢 45px → 占满行宽+省略
                   decoration: InputDecoration(
                     labelText: tr('工作模式'),
                     helperText: tr(
                         '模式一：GUI 手动使用｜模式二：CLI 交给 Agent，软件配 API｜模式三：Agent 全权，软件不配 API'),
+                    helperMaxLines: 3,
                     border: OutlineInputBorder(),
                   ),
                   items: [
@@ -1553,7 +1562,8 @@ class _HomePageState extends State<HomePage> {
                     hintText: 'sk-...',
                     helperText: tr(modeVal == 2
                         ? '模式三由 AI Agent 调用自己的 API，本软件不需要 Key'
-                        : '仅存于本机配置文件（混淆存储）'),
+                        : '仅存于本机配置文件（DPAPI / 混淆存储）'),
+                    helperMaxLines: 3,
                     border: const OutlineInputBorder(),
                   ),
                 ),
@@ -1563,6 +1573,7 @@ class _HomePageState extends State<HomePage> {
                       SettingsStore.knownModels.containsKey(modelCtrl.text)
                           ? modelCtrl.text
                           : null,
+                  isExpanded: true,
                   // 模式三灰化：模型由 Agent 决定，软件不调 API
                   disabledHint: Text(tr('模式三由 Agent 决定模型')),
                   decoration: InputDecoration(
@@ -1570,6 +1581,7 @@ class _HomePageState extends State<HomePage> {
                     helperText: tr(modeVal == 2
                         ? '模式三不使用本软件的识图模型'
                         : '任选预设，也可在下方手填自定义模型 id'),
+                    helperMaxLines: 3,
                     border: const OutlineInputBorder(),
                   ),
                   items: [
@@ -1608,6 +1620,7 @@ class _HomePageState extends State<HomePage> {
                   initialValue: widget.settings.language.isEmpty
                       ? 'auto'
                       : widget.settings.language,
+                  isExpanded: true,
                   decoration: InputDecoration(
                     labelText: '界面语言 / Language',
                     border: OutlineInputBorder(),
@@ -1636,21 +1649,25 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                TextField(
-                  controller: scriptCtrl,
-                  decoration: InputDecoration(
-                    labelText: tr('渲染脚本 render_orbat.js'),
-                    helperText: tr('出图用的线上渲染脚本绝对路径'),
-                    border: OutlineInputBorder(),
+                // 渲染脚本与 node 说明仅桌面有意义；安卓走 WebView 渲染，隐藏以省高度
+                if (!Platform.isAndroid) ...[
+                  TextField(
+                    controller: scriptCtrl,
+                    decoration: InputDecoration(
+                      labelText: tr('渲染脚本 render_orbat.js'),
+                      helperText: tr('出图用的线上渲染脚本绝对路径'),
+                      helperMaxLines: 2,
+                      border: OutlineInputBorder(),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  tr('说明：出图必须联网，调用 spatialillusions.com 线上渲染器。\n'
-                      '需要 node ≥ 24，脚本会自行探测。'),
-                  style: TextStyle(fontSize: 12),
-                ),
-                const Divider(height: 24),
+                  const SizedBox(height: 12),
+                  Text(
+                    tr('说明：出图必须联网，调用 spatialillusions.com 线上渲染器。\n'
+                        '需要 node ≥ 24，脚本会自行探测。'),
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  const Divider(height: 24),
+                ],
                 Align(
                   alignment: Alignment.centerLeft,
                   child: Text(tr('日志与诊断'),
@@ -1690,7 +1707,8 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ],
                 ),
-              ],
+                ],
+              ),
             ),
           ),
           actions: [
@@ -2167,34 +2185,44 @@ class _HomePageState extends State<HomePage> {
             decoration: BoxDecoration(
               border: Border(bottom: BorderSide(color: theme.dividerColor)),
             ),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 240,
-                  child: TabBar(
-                    labelStyle: TextStyle(fontSize: 13),
-                    tabs: [
-                      Tab(height: 38, text: tr('结构')),
-                      Tab(height: 38, text: tr('JSON 编辑')),
-                      Tab(height: 38, text: tr('批量')),
-                    ],
+            // 手机窄屏：固定 240 宽 TabBar + 两个文字按钮会右溢 13px →
+            // TabBar 收缩 + 按钮收图标
+            child: LayoutBuilder(builder: (context, c) {
+              final narrowBar = c.maxWidth < 640;
+              return Row(
+                children: [
+                  Flexible(
+                    child: TabBar(
+                      isScrollable: narrowBar,
+                      labelStyle: TextStyle(fontSize: 13),
+                      labelPadding: narrowBar
+                          ? const EdgeInsets.symmetric(horizontal: 10)
+                          : EdgeInsets.zero,
+                      tabs: [
+                        Tab(height: 38, text: tr('结构')),
+                        Tab(height: 38, text: tr('JSON 编辑')),
+                        Tab(height: 38, text: tr('批量')),
+                      ],
+                    ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                if (_report != null) _reportChip(theme, _report!),
-                const Spacer(),
-                TextButton.icon(
-                  onPressed: _jsonText.isEmpty ? null : _validateEditedJson,
-                  icon: const Icon(Icons.rule_outlined, size: 16),
-                  label: Text(tr('校验')),
-                ),
-                TextButton.icon(
-                  onPressed: _jsonText.isEmpty ? null : _exportJson,
-                  icon: const Icon(Icons.download_outlined, size: 16),
-                  label: Text(tr('导出')),
-                ),
-              ],
-            ),
+                  const SizedBox(width: 8),
+                  if (_report != null) _reportChip(theme, _report!),
+                  const Spacer(),
+                  IconButton(
+                    tooltip: tr('校验当前 JSON'),
+                    onPressed: _jsonText.isEmpty ? null : _validateEditedJson,
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.rule_outlined, size: 18),
+                  ),
+                  IconButton(
+                    tooltip: tr('导出编制 JSON'),
+                    onPressed: _jsonText.isEmpty ? null : _exportJson,
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.download_outlined, size: 18),
+                  ),
+                ],
+              );
+            }),
           ),
           Expanded(
             child: TabBarView(
@@ -3337,7 +3365,10 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildStatusBar(ThemeData theme) {
-    return Container(
+    // SafeArea：手势导航条会盖住 30px 高的状态栏文字
+    return SafeArea(
+      top: false,
+      child: Container(
       height: 30,
       padding: const EdgeInsets.symmetric(horizontal: 14),
       decoration: BoxDecoration(
@@ -3367,6 +3398,7 @@ class _HomePageState extends State<HomePage> {
             style: TextStyle(fontSize: 11, color: theme.hintColor),
           ),
         ],
+      ),
       ),
     );
   }

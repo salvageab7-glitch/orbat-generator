@@ -16,9 +16,9 @@ dependencies:
   # Windows DPAPI（CryptProtectData）需要：纯 Dart FFI，GUI 与 CLI 共用
   win32: ^5.15.0
   ffi: ^2.0.0
-  # 安卓端：应用私有目录（配置/产物路径）
-  path_provider: ^2.1.5
   # 安卓端出图（方案A）：内置 WebView 加载 spatialillusions 线上站点渲染
+  # （path_provider 已弃用：其 2.3.x JNI 实现在部分机型抛 ClassNotFoundException，
+  #  目录改由 Directory.systemTemp 反推应用数据根获得）
   webview_flutter: ^4.13.0
 
 dev_dependencies:

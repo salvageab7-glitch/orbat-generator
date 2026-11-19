@@ -618,6 +618,7 @@ Future<void> _cmdSelfCheck(List<String> args) async {
     // selfcheck --smoke：真渲染一次，验证"能不能出图"（约 15-25 秒）
     smokeRender: args.contains('--smoke'),
     outputDir: _defaultCliOutputDir(),
+    mode: settings.mode,
   );
   _out(_ok('selfcheck', {
         'allOk': r.allOk,
