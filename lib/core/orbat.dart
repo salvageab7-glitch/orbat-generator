@@ -1,5 +1,7 @@
 /// ORBAT 数据模型 + 7 键归一化 + 红牌校验
+import 'schema_rules.dart';
 import 'sidc_entities.dart';
+import 'sidc_rule.dart';
 import 'sidc_tables.dart';
 
 /// 一个编制节点
@@ -34,10 +36,17 @@ class OrbatNode {
   }
 
   /// 转成渲染器要求的 7 键归一化结构
-  Map<String, dynamic> toNormalizedJson({required String commandLevels}) {
-    // 渲染适配：线上渲染器对超长标签（实测 30+ 字符的英文全名带括号驻地）
-    // 会卡在"画布渲染"阶段直至超时。把括号内容移到注释、名称压到安全长度。
-    final adapted = _adaptNameForRenderer(uniqueDesignation, additionalInformation);
+  ///
+  /// [adaptForRender] = true 时才做渲染适配（括号内容移到注释、名称压到安全长度）。
+  /// **导出/保存必须用 false**：用户存下来的 JSON 应当与识别结果逐字一致，
+  /// 以前默认就适配，导致导出文件里的名称是被截断过的（v0.4 修正）。
+  Map<String, dynamic> toNormalizedJson({
+    required String commandLevels,
+    bool adaptForRender = false,
+  }) {
+    final adapted = adaptForRender
+        ? _adaptNameForRenderer(uniqueDesignation, additionalInformation)
+        : (name: uniqueDesignation, note: additionalInformation);
     return {
       'options': {
         'sidc': sidc,
@@ -49,7 +58,8 @@ class OrbatNode {
         'showMapLabels': true,
       },
       'subOrganizations': children
-          .map((c) => c.toNormalizedJson(commandLevels: ''))
+          .map((c) => c.toNormalizedJson(
+              commandLevels: '', adaptForRender: adaptForRender))
           .toList(),
       // commandLevels 只出现在根节点，由外层统一加
     };
@@ -95,9 +105,12 @@ class OrbatNode {
 }
 
 /// 归一化后的完整树（带根 commandLevels）
+///
+/// [adaptForRender] 默认 false（保真）。只有真正送给线上渲染器时才传 true。
 Map<String, dynamic> normalizeTree(OrbatNode root,
-    {required String commandLevels}) {
-  final json = root.toNormalizedJson(commandLevels: commandLevels);
+    {required String commandLevels, bool adaptForRender = false}) {
+  final json = root.toNormalizedJson(
+      commandLevels: commandLevels, adaptForRender: adaptForRender);
   json['commandLevels'] = commandLevels;
   return json;
 }
@@ -134,8 +147,9 @@ class OrbatValidator {
     return ValidationReport(issues: issues, nodeCount: root.count, depth: depth);
   }
 
-  static void _checkNode(
-      OrbatNode node, String path, List<ValidationIssue> issues, int depth) {
+  static void _checkNode(OrbatNode node, String path, List<ValidationIssue> issues,
+      int depth,
+      {String? parentEchelon, String? parentName}) {
     // SIDC 长度与格式
     if (node.sidc.length != 30) {
       issues.add(ValidationIssue(
@@ -185,6 +199,47 @@ class OrbatValidator {
         issues.add(ValidationIssue(
             'red', path, '110000(HQ) 禁止加类型修饰 98，会导致整棵子树渲染消失'));
       }
+
+      // ---- 结构自洽四查（v0.4 / A2）----
+      // 这四条以前只能靠人眼在树视图里翻：码在表里"合法"，图却画错。
+
+      // ① 层级倒挂：子节点梯队高于父节点（营下挂旅），图上结构必错
+      final rank = _echelonRank[echelon];
+      final parentRank = _echelonRank[parentEchelon];
+      if (rank != null && parentRank != null && rank > parentRank) {
+        issues.add(ValidationIssue('red', path,
+            '层级倒挂：本级梯队 $echelon 高于上级「${parentName ?? "?"}」的 $parentEchelon'));
+      }
+
+      // ② 名称层级词与梯队码不一致（名字写"营"，码给"连"）
+      final nameEch = SidcRule.guessEchelon(node.uniqueDesignation);
+      if (nameEch != '00' && echelon != '00' && nameEch != echelon) {
+        // 例外：上级「XX部」按惯例低一级（旅部用连级 15），名称推断已处理，
+        // 这里只对"明显差两级以上"或非 HQ 情况报警，减少噪音
+        final isHqNode = node.uniqueDesignation.endsWith('部');
+        if (!isHqNode) {
+          issues.add(ValidationIssue('warn', path,
+              '名称层级词对应 $nameEch，但 SIDC 梯队段是 $echelon（「${node.uniqueDesignation}」）'));
+        }
+      }
+
+      // ③ 空中单位必须用符号集 01（直升机/无人机/各类固定翼）
+      // 例外：陆军航空兵（120600）是地面建制，用符号集 10 是对的
+      final looksAir = RegExp(
+              r'直升机|无人机|运输机|战斗机|攻击机|轰炸机|加油机|教练机|预警机|侦察机|飞行'
+              r'|helicopter|drone|\buav\b|aircraft|fighter|bomber|transport aircraft',
+              caseSensitive: false)
+          .hasMatch(node.uniqueDesignation);
+      final isArmyAviation =
+          RegExp(r'航空兵|陆航|陆军航空').hasMatch(node.uniqueDesignation);
+      if (looksAir && !isArmyAviation && symbolSet == '10') {
+        issues.add(ValidationIssue('red', path,
+            '「${node.uniqueDesignation}」是空中单位，符号集应为 01，当前是 10（会渲染成方块）'));
+      }
+      if (!looksAir && symbolSet == '01') {
+        issues.add(ValidationIssue('warn', path,
+            '符号集为 01（空中），但名称「${node.uniqueDesignation}」不像空中单位'));
+      }
     }
 
     // 命名铁律
@@ -214,23 +269,73 @@ class OrbatValidator {
           'warn', path, '「$name」有 ${node.children.length} 个直属下属，'
               '超过 10 个渲染器会折行，建议确认是否需要分层'));
     }
-    // 注释长度（按汉字计，粗略：非 ASCII 字符算 1，ASCII 算 0.5）
+    // 注释长度（v0.4 新规：3 个中文词语 ≈ 12 汉字 / 20 字母）
     final note = node.additionalInformation;
-    final cjk = note.runes.where((r) => r > 0x2E80).length;
-    if (cjk > 24) {
-      issues.add(ValidationIssue(
-          'red', path, '注释含 $cjk 个汉字 > 24，会在图上溢出'));
+    final usage = measureNote(note);
+    if (!usage.ok) {
+      issues.add(ValidationIssue('red', path,
+          '注释超长：${usage.cjk} 汉字（上限 $kNoteMaxCjk）/ '
+          '${usage.letters} 字母（上限 $kNoteMaxLetters）'));
     }
     // 指挥官姓名（粗检："师长XXX"这类）——软警告
-    if (RegExp(r'(师长|旅长|团长|营长|连长)[^\s·,，]{2,4}').hasMatch(note)) {
+    if (kCommanderPattern.hasMatch(note)) {
       issues.add(ValidationIssue('warn', path, '注释疑似含指挥官姓名，应移除'));
     }
+    // 注释里塞了自检说明（质量备注不是数据）
+    if (kSelfCheckNotePattern.hasMatch(note)) {
+      issues.add(ValidationIssue(
+          'warn', path, '注释含自检说明（应清空，质量备注不写进数据字段）'));
+    }
 
+    // 同父兄弟重名/前缀重复：提示词铁律第 8 条要求了，这里补上机器检查
+    final seen = <String>[];
+    for (final c in node.children) {
+      final n = c.uniqueDesignation.trim();
+      if (n.isEmpty) continue;
+      if (seen.contains(n)) {
+        issues.add(ValidationIssue(
+            'red', '$path/$n', '同一父节点下出现同名子节点「$n」，会画成两个重复单位'));
+      } else {
+        for (final prev in seen) {
+          if (prev.length >= 4 &&
+              n.length >= 4 &&
+              !prev.endsWith('部') &&
+              !n.endsWith('部') &&
+              (prev.startsWith(n) || n.startsWith(prev))) {
+            issues.add(ValidationIssue('warn', '$path/$n',
+                '「$n」与兄弟「$prev」名称互为前缀，疑似同一单位被识别两次'));
+            break;
+          }
+        }
+        seen.add(n);
+      }
+    }
+
+    final selfEchelon = node.sidc.length >= 10 ? node.sidc.substring(8, 10) : null;
     for (var i = 0; i < node.children.length; i++) {
       _checkNode(node.children[i], '$path/${node.children[i].uniqueDesignation}',
-          issues, depth + 1);
+          issues, depth + 1,
+          parentEchelon: selfEchelon, parentName: node.uniqueDesignation);
     }
   }
+
+  /// 梯队码秩（用于判断层级倒挂）。数字越大层级越高。
+  static const Map<String, int> _echelonRank = {
+    '11': 1, // 组/车组
+    '12': 2, // 班
+    '13': 3, // 组/小队
+    '14': 4, // 排
+    '15': 5, // 连
+    '16': 6, // 营
+    '17': 7, // 团
+    '18': 8, // 旅
+    '21': 9, // 师
+    '22': 10, // 军
+    '23': 11, // 集团军
+    '24': 12, // 方面军
+    '25': 13, // 战区
+    '26': 14, // 总指挥部
+  };
 }
 
 class ValidationReport {

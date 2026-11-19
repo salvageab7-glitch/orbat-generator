@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../i18n/l10n.dart';
 import '../core/orbat.dart';
 import '../core/sidc.dart';
 import '../core/sidc_tables.dart';
@@ -13,11 +14,15 @@ class TreeView extends StatefulWidget {
   /// 变化时自动展开祖先并滚动到该节点。
   final String? focusPath;
 
+  /// 行尾「编辑」回调：路径格式与校验器一致（根/第1旅/第2营），可直接用于补丁式修改
+  final void Function(OrbatNode node, String path)? onEditNode;
+
   const TreeView({
     super.key,
     required this.root,
     this.report,
     this.focusPath,
+    this.onEditNode,
   });
 
   @override
@@ -93,8 +98,7 @@ class _TreeViewState extends State<TreeView> {
             ? theme.colorScheme.primary.withValues(alpha: 0.08)
             : Colors.transparent,
         child: InkWell(
-          onTap: () => setState(
-              () => _selectedPath = selected ? null : path),
+          onTap: () => setState(() => _selectedPath = selected ? null : path),
           child: Padding(
             padding: EdgeInsets.only(
               left: 8.0 + depth * 18,
@@ -146,9 +150,9 @@ class _TreeViewState extends State<TreeView> {
                         children: [
                           Flexible(
                             child: Text(
-                              node.uniqueDesignation.isEmpty
+                              tr(node.uniqueDesignation.isEmpty
                                   ? '(无名)'
-                                  : node.uniqueDesignation,
+                                  : node.uniqueDesignation),
                               style: TextStyle(
                                 fontSize: 13,
                                 fontWeight: depth <= 1
@@ -177,6 +181,17 @@ class _TreeViewState extends State<TreeView> {
                     ],
                   ),
                 ),
+                if (widget.onEditNode != null)
+                  IconButton(
+                    tooltip: tr('编辑名称 / 注释 / 编码'),
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints:
+                        const BoxConstraints(minWidth: 28, minHeight: 28),
+                    onPressed: () => widget.onEditNode!(node, path),
+                    icon: Icon(Icons.edit_outlined,
+                        size: 15, color: theme.hintColor),
+                  ),
                 if (hasChildren)
                   Padding(
                     padding: const EdgeInsets.only(left: 6, top: 3),
@@ -199,8 +214,8 @@ class _TreeViewState extends State<TreeView> {
 
     if (!collapsed) {
       for (final child in node.children) {
-        _buildRows(context, child, '$path/${child.uniqueDesignation}', depth + 1,
-            issues, out);
+        _buildRows(context, child, '$path/${child.uniqueDesignation}',
+            depth + 1, issues, out);
       }
     }
   }
@@ -222,10 +237,12 @@ class _TreeViewState extends State<TreeView> {
     final theme = Theme.of(context);
     final sidc = Sidc.parse(node.sidc);
     return Container(
-      margin: EdgeInsets.only(left: 40.0 + depth * 18, right: 12, top: 2, bottom: 8),
+      margin: EdgeInsets.only(
+          left: 40.0 + depth * 18, right: 12, top: 2, bottom: 8),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+        color:
+            theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: theme.dividerColor),
       ),
@@ -236,9 +253,11 @@ class _TreeViewState extends State<TreeView> {
           if (sidc != null) ...[
             const SizedBox(height: 6),
             _kv('符号集', sidc.symbolSet == '01' ? '空中 (01)' : '陆地 (10)'),
-            _kv('梯队', '${kEchelon[sidc.echelon] ?? sidc.echelon} (${sidc.echelon})'),
+            _kv('梯队',
+                '${kEchelon[sidc.echelon] ?? sidc.echelon} (${sidc.echelon})'),
             _kv('主实体', '${sidc.entityName} (${sidc.entity})'),
-            _kv('类型修饰', '${kTypeModifier[sidc.typeMod] ?? "未知"} (${sidc.typeMod})'),
+            _kv('类型修饰',
+                '${kTypeModifier[sidc.typeMod] ?? "未知"} (${sidc.typeMod})'),
             _kv('机动修饰',
                 '${kMobilityModifier[sidc.mobilityMod] ?? "未知"} (${sidc.mobilityMod})'),
             _kv('扇区修饰',
@@ -256,7 +275,8 @@ class _TreeViewState extends State<TreeView> {
                     '${i.level == 'red' ? '●' : '○'} ${i.message}',
                     style: TextStyle(
                       fontSize: 11,
-                      color: i.level == 'red' ? Colors.redAccent : Colors.orange,
+                      color:
+                          i.level == 'red' ? Colors.redAccent : Colors.orange,
                     ),
                   ),
                 )),
@@ -274,7 +294,8 @@ class _TreeViewState extends State<TreeView> {
         children: [
           SizedBox(
             width: 68,
-            child: Text(k, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+            child: Text(k,
+                style: const TextStyle(fontSize: 11, color: Colors.grey)),
           ),
           Expanded(
             child: SelectableText(

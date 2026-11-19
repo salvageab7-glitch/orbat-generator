@@ -1,0 +1,46 @@
+{
+  "note": "澳军第2师局部基准（agent 侧人工校订，用于本地回归；不是完整编制）",
+  "root": "2nd Division",
+  "nodes": [
+    {
+      "name": "2nd Division HQ",
+      "parent": "2nd Division",
+      "echelon": "21"
+    },
+    {
+      "name": "2nd Division Signals Regiment",
+      "parent": "2nd Division",
+      "echelon": "17"
+    },
+    {
+      "name": "1st Brigade",
+      "parent": "2nd Division",
+      "echelon": "18"
+    },
+    {
+      "name": "1st Battalion",
+      "parent": "1st Brigade",
+      "echelon": "16"
+    },
+    {
+      "name": "2nd Battalion",
+      "parent": "1st Brigade",
+      "echelon": "16"
+    },
+    {
+      "name": "3rd Brigade",
+      "parent": "2nd Division",
+      "echelon": "18"
+    },
+    {
+      "name": "4th Battalion",
+      "parent": "3rd Brigade",
+      "echelon": "16"
+    },
+    {
+      "name": "2nd Aviation Regiment(Helicopter)",
+      "parent": "2nd Division",
+      "echelon": "17"
+    }
+  ]
+}

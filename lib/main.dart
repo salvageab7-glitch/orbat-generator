@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import 'core/logger.dart';
+import 'i18n/l10n.dart';
+import 'ui/l10n_ui.dart';
 import 'ui/home_page.dart';
 import 'services/settings_store.dart';
 
@@ -56,15 +58,18 @@ Future<void> main(List<String> args) async {
 
   AppLogger.instance.info('app', '应用启动 | args=$args');
   final settings = await SettingsStore.load();
-  AppLogger.instance.info('app', '配置加载完成 | model=${settings.model} '
-      '| key=${AppLogger.keyFingerprint(settings.apiKey)}');
+  // 界面语言：'zh'/'en'，空 = 跟随系统
+  L10n.apply(settings.language);
+  AppLogger.instance.info(
+      'app',
+      '配置加载完成 | model=${settings.model} '
+          '| key=${AppLogger.keyFingerprint(settings.apiKey)}');
   // 支持 `启动.exe <某编制.json>` 直接打开；`<某图片.png> --generate` 直接识图
   final jsonArg = args.where((a) => !a.startsWith('--')).toList();
   // split('.').last 返回的是不带点的扩展名（jpg），列表也必须用不带点的形式
   const imageExts = ['png', 'jpg', 'jpeg', 'webp', 'bmp'];
-  final firstExt = jsonArg.isNotEmpty
-      ? jsonArg.first.toLowerCase().split('.').last
-      : '';
+  final firstExt =
+      jsonArg.isNotEmpty ? jsonArg.first.toLowerCase().split('.').last : '';
   final isImage = imageExts.contains(firstExt);
   final pathExists = jsonArg.isNotEmpty && File(jsonArg.first).existsSync();
   final initialJson = pathExists && !isImage ? jsonArg.first : null;
@@ -73,9 +78,10 @@ Future<void> main(List<String> args) async {
   // `--generate` 传入图片路径时自动识图（软件本体的命令行入口，与 CLI 等价）
   final autoGenerate = args.contains('--generate');
   final imageArg = pathExists && isImage ? jsonArg.first : null;
-  AppLogger.instance.info('app',
+  AppLogger.instance.info(
+      'app',
       '命令行参数解析: jsonArg=$jsonArg, initialJson=$initialJson, '
-      'initialImage=$imageArg, autoRender=$autoRender, autoGenerate=$autoGenerate');
+          'initialImage=$imageArg, autoRender=$autoRender, autoGenerate=$autoGenerate');
   runApp(OrbatApp(
     settings: settings,
     initialJsonPath: initialJson,
@@ -109,25 +115,35 @@ class _OrbatAppState extends State<OrbatApp> {
 
   @override
   Widget build(BuildContext context) {
+    // 语言切换时整棵树重建（字典命中即换成英文，漏译回退中文）
+    return ValueListenableBuilder<int>(
+      valueListenable: l10nRevision,
+      builder: (context, _, __) => _buildApp(L10n.current),
+    );
+  }
+
+  Widget _buildApp(AppLang lang) {
     const seed = Color(0xFF2E6BE6);
     // 统一字体：微软雅黑。系统自带、零体积，中文和西文（含俄文字母、数字）字重一致，
     // 避免默认 Segoe UI 在中文回退时出现行高与字形跳变。
     const uiFont = 'Microsoft YaHei';
     const fontFallback = <String>['Microsoft YaHei', 'Segoe UI', 'SimSun'];
     return MaterialApp(
-      title: '编制图生成器',
+      title: tr('编制图生成器'),
       debugShowCheckedModeBanner: false,
       themeMode: _themeMode,
       theme: ThemeData(
         fontFamily: uiFont,
         fontFamilyFallback: fontFallback,
-        colorScheme: ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.light),
+        colorScheme:
+            ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.light),
         useMaterial3: true,
       ),
       darkTheme: ThemeData(
         fontFamily: uiFont,
         fontFamilyFallback: fontFallback,
-        colorScheme: ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.dark),
+        colorScheme:
+            ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.dark),
         useMaterial3: true,
         scaffoldBackgroundColor: const Color(0xFF15171C),
       ),
@@ -147,7 +163,8 @@ class _OrbatAppState extends State<OrbatApp> {
 }
 
 /// 供 UI 判断平台能力
-bool get isDesktop => Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+bool get isDesktop =>
+    Platform.isWindows || Platform.isLinux || Platform.isMacOS;
 
 /// 已有实例时的提示页（短暂显示后自动退出）
 class _AlreadyRunningApp extends StatelessWidget {
@@ -165,11 +182,10 @@ class _AlreadyRunningApp extends StatelessWidget {
               Icon(Icons.info_outline,
                   size: 48, color: Theme.of(context).colorScheme.primary),
               const SizedBox(height: 16),
-              const Text('编制图生成器已在运行',
+              Text(tr('编制图生成器已在运行'),
                   style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
               const SizedBox(height: 8),
-              const Text('请切换到已打开的窗口。此窗口即将关闭。',
-                  style: TextStyle(fontSize: 13)),
+              Text(tr('请切换到已打开的窗口。此窗口即将关闭。'), style: TextStyle(fontSize: 13)),
             ],
           ),
         ),

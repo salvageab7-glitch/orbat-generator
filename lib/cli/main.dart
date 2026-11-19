@@ -12,8 +12,13 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
+import '../core/app_paths.dart';
 import '../core/logger.dart';
+import '../core/auto_fix.dart';
+import '../core/dup_scan.dart';
 import '../core/orbat.dart';
+import '../core/patch_repair.dart';
+import '../core/sidc_audit.dart';
 import '../core/self_check.dart';
 import '../core/usage_store.dart';
 import '../pipeline.dart';
@@ -52,16 +57,11 @@ Map<String, dynamic> _ok(String cmd, Map<String, dynamic> data) {
   };
 }
 
-/// CLI 兜底输出目录（命令自身已优先用输入目录）。无输入上下文时用桌面。
-String _defaultCliOutputDir() {
-  if (Platform.isWindows) {
-    final up = Platform.environment['USERPROFILE'];
-    if (up != null && up.isNotEmpty && Directory('$up\\Desktop').existsSync()) {
-      return '$up\\Desktop';
-    }
-  }
-  return Platform.environment['HOME'] ?? Directory.systemTemp.path;
-}
+/// CLI 兜底输出目录（命令自身已优先用输入目录）。
+///
+/// 0.3.2 起统一为 exe 同级「输出文件存档\」：与 GUI 一致、不写桌面根，
+/// 且对 Agent 调用方而言目录位置可预测（就在 orbat-cli.exe 旁边）。
+String _defaultCliOutputDir() => ensureArchiveDir();
 
 Map<String, dynamic> _fail(String cmd, String msg) => {
       'ok': false,
@@ -147,6 +147,12 @@ Future<void> _runMain(List<String> args) async {
     switch (cmd) {
       case 'parse':
         await _cmdParse(rest);
+        break;
+      case 'audit':
+        await _cmdAudit(args);
+        break;
+      case 'edit':
+        await _cmdEdit(args);
         break;
       case 'validate':
         await _cmdValidate(rest);
@@ -245,6 +251,143 @@ Future<void> _cmdValidate(List<String> args) async {
   }
 }
 
+/// audit/edit 用：优先 --in <文件>，其次位置参数/stdin
+Future<String?> _readInputWithIn(List<String> args) async {
+  final inPath = _option(args, 'in');
+  if (inPath != null && inPath.isNotEmpty) {
+    final f = File(inPath);
+    if (!f.existsSync()) throw FormatException('输入文件不存在: $inPath');
+    return await f.readAsString();
+  }
+  return _readInput(args);
+}
+
+/// audit —— 一致性审计 + 结构校验 + 跨父同名扫描（只读，不改文件）
+Future<void> _cmdAudit(List<String> args) async {
+  final text = await _readInputWithIn(args);
+  if (text == null) {
+    _out(_fail('audit', '没有输入：请传文件路径或通过 stdin 管道输入 JSON'));
+    exitCode = 2;
+    return;
+  }
+  try {
+    final tree = parseTreeJson(text);
+    if (tree == null) throw const FormatException('JSON 无法解析为编制树');
+    final audit = SidcAudit.run(tree);
+    final report = OrbatValidator.validate(tree);
+    final dups = scan(tree);
+    _out(_ok('audit', {
+      'nodeCount': tree.count,
+      'depth': tree.maxDepth,
+      'sidcMismatchCount': audit.length,
+      'sidcMismatches': audit
+          .map((a) => {
+                'path': a.path,
+                'name': a.name,
+                'kind': a.kind.name,
+                'current': a.modelSidc,
+                'suggested': a.suggestedSidc,
+                'reason': a.reason,
+              })
+          .toList(),
+      'duplicateCount': dups.length,
+      'duplicates': dups
+          .map((d) => {'name': d.displayName, 'paths': d.paths})
+          .toList(),
+      'redCount': report.redCount,
+      'warnCount': report.warnCount,
+      'issues': report.issues
+          .map((i) => {'level': i.level, 'path': i.path, 'message': i.message})
+          .toList(),
+    }));
+  } catch (e) {
+    _out(_fail('audit', '$e'));
+    exitCode = 1;
+  }
+}
+
+/// edit —— 按路径改单位名称/注释/SIDC（补丁式，绝不重写整棵树）
+///
+/// 用法：
+///   orbat-cli edit --in 编制.json --path "根/第1旅/第2营" --name "新名" --note "驻地" --out 新.json
+///   orbat-cli edit --in 编制.json --patches 补丁.json --out 新.json
+/// 省略 --out 时直接覆盖输入文件（有 --in/文件参数才行）。
+Future<void> _cmdEdit(List<String> args) async {
+  final text = await _readInputWithIn(args);
+  if (text == null) {
+    _out(_fail('edit', '没有输入：请传文件路径或通过 stdin 管道输入 JSON'));
+    exitCode = 2;
+    return;
+  }
+  final output = _option(args, 'out');
+  final patchesFile = _option(args, 'patches');
+  final path = _option(args, 'path');
+  try {
+    final tree = parseTreeJson(text);
+    if (tree == null) throw const FormatException('JSON 无法解析为编制树');
+
+    final patches = <NodePatch>[];
+    if (patchesFile != null && patchesFile.isNotEmpty) {
+      final f = File(patchesFile);
+      if (!f.existsSync()) throw FormatException('补丁文件不存在: $patchesFile');
+      patches.addAll(parsePatchList(await f.readAsString()));
+    }
+    if (path != null && path.isNotEmpty) {
+      patches.add(NodePatch(
+        path: path,
+        name: _option(args, 'name'),
+        sidc: _option(args, 'sidc'),
+        note: _option(args, 'note'),
+      ));
+    }
+    if (patches.isEmpty) {
+      _out(_fail('edit', '没有可应用的修改：需要 --path（配 --name/--note/--sidc）或 --patches'));
+      exitCode = 2;
+      return;
+    }
+
+    final res = applyPatches(tree, patches);
+    if (!res.ok) {
+      _out(_fail('edit', '补丁路径全部未命中，未做修改。检查 --path 是否与树中的名称逐字一致'));
+      exitCode = 1;
+      return;
+    }
+    // 改完照常走机械修复 + 校验，避免用户手工改出超长注释/带空格括号
+    final fixed = OrbatAutoFix.apply(res.tree);
+    final report = OrbatValidator.validate(fixed);
+    final json = normalizeTreeJson(fixed);
+
+    // 落盘：--out 优先；否则覆盖输入文件（有文件参数时）
+    String? written;
+    if (output != null && output.isNotEmpty) {
+      await File(output).writeAsString(json);
+      written = output;
+    } else {
+      final positional = _positionalArgs(args);
+      if (positional.isNotEmpty && File(positional.first).existsSync()) {
+        await File(positional.first).writeAsString(json);
+        written = positional.first;
+      }
+    }
+    if (written == null) {
+      _out(_fail('edit', '没有输出路径：请加 --out <文件>（stdin 输入时无法覆盖原文件）'));
+      exitCode = 2;
+      return;
+    }
+    _out(_ok('edit', {
+      'out': written,
+      'applied': res.applied,
+      'skipped': res.skipped,
+      'nodeCount': fixed.count,
+      'redCount': report.redCount,
+      'warnCount': report.warnCount,
+    }));
+  } catch (e) {
+    _out(_fail('edit', '$e'));
+    exitCode = 1;
+  }
+}
+
 Future<void> _cmdNormalize(List<String> args) async {
   final text = await _readInput(args);
   if (text == null) {
@@ -284,6 +427,8 @@ Future<void> _cmdRender(List<String> args) async {
   final imagePath = _option(args, 'image');
   final textPath = _option(args, 'text');
   final whiteBg = _flag(args, 'white-bg', defaultValue: true);
+  // --raw-names：保留原文称号/番号（对应界面「全中文输出」开关取消勾选）
+  final forceChinese = !args.contains('--raw-names');
 
   // --out 可省略：省略时用输入目录 + 日期 + 根名（CLI 默认输入目录）
   final settings = await SettingsStore.load();
@@ -292,6 +437,7 @@ Future<void> _cmdRender(List<String> args) async {
     model: settings.model,
     renderScriptPath: settings.renderScriptPath,
     whiteBackground: whiteBg,
+    forceChinese: forceChinese,
   );
 
   OrbatNode? tree;
@@ -451,6 +597,8 @@ Future<void> _cmdGenerate(List<String> args) async {
         'warnCount': r.report?.warnCount ?? 0,
         'aiAttempts': r.aiAttempts,
         'repairRounds': r.repairRounds,
+        // v0.4：名称与 SIDC 不一致、已按名称自动修正的条数
+        'sidcAuditFixed': r.auditIssues.length,
         'elapsedMs': r.elapsed.inMilliseconds,
         'outJson': outJson,
         if (outJson == null) 'json': jsonDecode(json),
@@ -462,6 +610,8 @@ Future<void> _cmdSelfCheck(List<String> args) async {
   final r = await SelfCheck.run(
     renderScriptPath: settings.renderScriptPath,
     apiKey: settings.apiKey,
+    // selfcheck --smoke：真渲染一次，验证"能不能出图"（约 15-25 秒）
+    smokeRender: args.contains('--smoke'),
   );
   _out(_ok('selfcheck', {
         'allOk': r.allOk,
@@ -741,6 +891,8 @@ ORBAT CLI —— 编制图生成器的命令行接口
 命令:
   parse      解析 JSON，输出节点数/层级/根名
   validate   校验 JSON，输出全部问题（红牌时 exit=3）
+  audit      一致性审计 + 跨父同名扫描（模型码与名称不自洽时给建议值）
+  edit       按路径改单位名称/注释/SIDC（补丁式，不重写整棵树）
   normalize  归一化为渲染器要求的 7 键结构
   render     出图（PNG + SVG）
   generate   从图片或文字生成编制 JSON（调 AI）
@@ -763,6 +915,8 @@ ORBAT CLI —— 编制图生成器的命令行接口
   --text <txt>          generate/render 的输入文本
   --extra <str>         generate 的补充说明
   --out <path>          输出路径/基名
+  --raw-names           generate 时保留原文称号/番号（默认译成中文）
+  --smoke               selfcheck 时真渲染一次，验证出图链路（约 15-25 秒）
   --no-white-bg         render 输出透明底 PNG
   --command-levels 3    normalize 的 commandLevels
 
@@ -775,6 +929,10 @@ ORBAT CLI —— 编制图生成器的命令行接口
   orbat.bat validate 编制.json
   orbat.bat render --in 编制.json --out 输出名 --no-white-bg
   orbat.bat generate --image 图.png --out 编制.json
+  orbat.bat generate --image 图.png --raw-names --out 原文.json
+  orbat.bat audit 编制.json
+  orbat.bat edit 编制.json --path "根/第1旅/第2营" --name "第2营" --note "Kensington"
+  orbat.bat selfcheck --smoke
   orbat.bat selfcheck
 ''';
 

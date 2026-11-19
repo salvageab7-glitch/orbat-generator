@@ -63,26 +63,129 @@ class SidcRule {
   }
 
   /// 从名称里的层级词判断梯队码
+  ///
+  /// v0.4 修正：改成**取最靠右的层级词**（中文与外文统一）。
+  /// 原因：编制单位名是"修饰语 + 中心词"结构，中心词在最后——
+  /// 「第2师通信团」必须判成团(17)，按老规则（词表顺序优先师）会判成师(21)，
+  /// 于是图画成师级方框、校验器还查不出来。测试用例见 v04_rules_test.dart。
   static String guessEchelon(String name) {
-    if (name.contains('方面军') || name.contains('战区')) return '25';
-    if (name.contains('集团军群')) return '24';
-    if (name.contains('集团军')) return '23';
-    if (name.contains('军区')) return '25';
-    if (name.contains('师') && !name.contains('师部')) return '21';
-    if (name.contains('旅') && !name.contains('旅部')) return '18';
-    if (name.contains('团') && !name.contains('团部')) return '17';
-    if (name.contains('营') && !name.contains('营部')) return '16';
-    if (name.contains('连') && !name.contains('连部')) return '15';
-    if (name.contains('排')) return '14';
-    if (name.contains('班')) return '12';
-    if (name.contains('组')) return '13';
+    final t = name.trim();
+    if (t.isEmpty) return '00';
 
-    // 「XX部」「司令部」「指挥部」类通常是上级的指挥机构
-    if (name.endsWith('部') || name.contains('司令部') || name.contains('指挥部')) {
-      return '15'; // 默认按连级指挥所
-    }
-    return '00';
+    final base = _echelonFromWords(t);
+    final lower = t.toLowerCase();
+
+    // 指挥所（XX部 / 司令部 / HQ）：按惯例比本级低一级
+    //   连部 15→14、营/团/旅部 16/17/18→15（旅部及旅部连这类以"连"结尾的不算部）
+    //   师及以上本级没有更低一级的合法码（19/20 禁用），沿用本级
+    final isHq = t.endsWith('部') ||
+        t.contains('司令部') ||
+        t.contains('指挥部') ||
+        _hqRe.hasMatch(lower);
+    if (!isHq) return base;
+
+    return switch (base) {
+      '21' || '22' || '23' || '24' || '25' => base,
+      '15' => '14',
+      '14' => '13',
+      '16' || '17' || '18' => '15',
+      _ => '15',
+    };
   }
+
+
+  /// 层级词是否落在名称尾部（最后一个词附近）。
+  ///
+  /// 用途：一致性审计只在"尾部有层级词"时才敢按名称改梯队码。
+  /// 反例：「2nd Division Postal Unit」——开头有 Division，但它是**母体名**，
+  /// 单位本身是连级；若照 Division 改成师级，会把对的结果改错。
+  static bool echelonAtTail(String name) {
+    final t = name.trim();
+    if (t.isEmpty) return false;
+    if (t.endsWith('部') || t.contains('司令部') || t.contains('指挥部')) {
+      return true;
+    }
+    if (_hqRe.hasMatch(t.toLowerCase())) return true;
+    final cands = _echelonCandidates(t);
+    if (cands.isEmpty) return false;
+    final kept = _dropContained(cands);
+    kept.sort((a, b) => b.at.compareTo(a.at));
+    final last = kept.first;
+
+    // 匹配之后剩下的部分：去掉括号内容（如 "(Helicopter)"）后只允许很少的尾缀，
+    // 且不能再含层级词——否则说明层级词在中间，它修饰的是母体名而不是本单位。
+    var suffix = t.substring(last.at + last.len);
+    suffix = suffix.replaceAll(RegExp(r'\([^)]*\)'), '').trim();
+    suffix = suffix.replaceAll(RegExp(r'[\s·\-—,，、]+$'), '');
+    // 只认"层级词之后什么都没有"的名称（括号内容已剥掉）。
+    // 例如 "2nd Division RAA"（师属炮兵）后面还有缩写，不能因为开头有 Division
+    // 就改成师级——宁可不动，也不要把对的改错。
+    return suffix.isEmpty;
+  }
+
+  /// 只按"最靠右的层级词"判层级，不处理指挥所
+  static String _echelonFromWords(String t) {
+    final cands = _echelonCandidates(t);
+    if (cands.isEmpty) return '00';
+    final kept = _dropContained(cands);
+    kept.sort((a, b) {
+      final byAt = b.at.compareTo(a.at);
+      return byAt != 0 ? byAt : b.len.compareTo(a.len);
+    });
+    return kept.first.code;
+  }
+
+  /// 收集所有层级词命中（中文 + 外文）
+  static List<({int at, int len, String code})> _echelonCandidates(String t) {
+    final candidates = <({int at, int len, String code})>[];
+    for (final (word, code) in _cjkEchelonWords) {
+      var i = t.indexOf(word);
+      while (i >= 0) {
+        candidates.add((at: i, len: word.length, code: code));
+        i = t.indexOf(word, i + 1);
+      }
+    }
+    final lower = t.toLowerCase();
+    for (final (re, code) in _foreignEchelonRules) {
+      for (final m in re.allMatches(lower)) {
+        candidates.add((at: m.start, len: m.end - m.start, code: code));
+      }
+    }
+    return candidates;
+  }
+
+  /// 去掉被更长命中包含的短词（「集团军」里的「军」、「division」里的「div」）
+  static List<({int at, int len, String code})> _dropContained(
+      List<({int at, int len, String code})> cands) {
+    final kept = <({int at, int len, String code})>[];
+    for (final c in cands) {
+      final inside = cands.any((o) =>
+          o.len > c.len && o.at <= c.at && o.at + o.len >= c.at + c.len);
+      if (!inside) kept.add(c);
+    }
+    return kept;
+  }
+
+  /// 中文层级词表（含复合词，靠"最右 + 去包含"消歧）
+  static const List<(String, String)> _cjkEchelonWords = [
+    ('方面军', '25'),
+    ('战区', '25'),
+    ('军区', '25'),
+    ('集团军群', '24'),
+    ('集团军', '23'),
+    ('师', '21'),
+    ('旅', '18'),
+    ('团', '17'),
+    ('营', '16'),
+    ('连', '15'),
+    ('排', '14'),
+    ('班', '12'),
+    ('组', '13'),
+  ];
+
+  /// 外文 HQ 判定（英文/俄文）
+  static final RegExp _hqRe =
+      RegExp(r'\b(hq|hqs|headquarter|headquarters|command post|staff)\b|штаб');
 
   /// 从名称判断兵种/职能，返回实体码 + 类型修饰 + 机动修饰
   static _Arm _guessArm(String name) {
@@ -98,6 +201,10 @@ class SidcRule {
         n.contains('旅部及旅部连')) {
       return const _Arm('110000', '00', '00', '指挥机构');
     }
+
+    // ---- 外文兵种词（v0.4）：原文模式下名称是英/俄文 ----
+    final foreign = _foreignArm(n);
+    if (foreign != null) return foreign;
 
     // ---- 火箭炮（须在普通炮兵之前判断）----
     if (n.contains('火箭炮') ||
@@ -223,6 +330,102 @@ class SidcRule {
     // ---- 完全判断不出来：用通用指挥标志，避免瞎编 ----
     return const _Arm('000000', '00', '00', '未能判断兵种');
   }
+}
+
+/// 外文层级词规则（正则 → 梯队码）
+///
+/// 顺序不再决定优先级——`guessEchelon` 统一取最靠右的层级词，
+/// 所以 "2nd Division Signals Regiment" 会正确判成团(17)而不是师(21)。
+final List<(RegExp, String)> _foreignEchelonRules = [
+  (RegExp(r'theater|theatre|\bfront\b'), '25'),
+  (RegExp(r'army group|front group'), '24'),
+  (RegExp(r'group army|combined arms army'), '23'),
+  (RegExp(r'\barmy\b|\bcorps\b|корпус'), '22'),
+  (RegExp(r'division|дивизи|\bdiv\b'), '21'),
+  (RegExp(r'brigade|бригад|\bbde\b'), '18'),
+  (RegExp(r'regiment|полк|\brgt\b'), '17'),
+  (RegExp(r'battalion|батальон|\bbn\b|\bbatt\b'), '16'),
+  (RegExp(r'squadron|эскадриль|\bsqn\b'), '16'),
+  (RegExp(r'company|рота|батаре|battery|\bcoy\b'), '15'),
+  (RegExp(r'platoon|взвод|\bplt\b'), '14'),
+  (RegExp(r'\btroop\b'), '14'),
+  (RegExp(r'\bsquad\b|отделен'), '12'),
+  (RegExp(r'\bteam\b|\bcrew\b'), '13'),
+];
+
+/// 外文兵种词 → 主实体码（与中文规则一一对应，顺序同样重要）
+_Arm? _foreignArm(String raw) {
+  final s = raw.toLowerCase();
+
+  // 指挥机构
+  if (RegExp(r'headquarter|\bhq\b|command post|\bstaff\b|штаб').hasMatch(s)) {
+    return const _Arm('110000', '00', '00', '指挥机构(en)');
+  }
+  // 火箭炮 / 多管火箭
+  if (RegExp(r'\bmlrs\b|rocket|град|ураган|смерч').hasMatch(s)) {
+    return const _Arm('130300', '41', '04', '多管火箭炮(en)');
+  }
+  // 反坦克导弹
+  if (RegExp(r'anti-?tank missile|\batgm\b|птур|конкурс|фагот|малютка').hasMatch(s)) {
+    return const _Arm('120400', '37', '00', '反坦克导弹(en)');
+  }
+  // 反坦克（通用）
+  if (RegExp(r'anti-?tank|противотанк').hasMatch(s)) {
+    return const _Arm('120400', '00', '00', '反坦克(en)');
+  }
+  // 迫击炮
+  if (RegExp(r'mortar|миномёт|миномет').hasMatch(s)) {
+    return const _Arm('130800', '12', '00', '迫击炮(en)');
+  }
+  // 自行火炮
+  if (RegExp(r'self-?propelled|самоходн').hasMatch(s) &&
+      RegExp(r'artillery|gun|гаубиц|артиллер').hasMatch(s)) {
+    return const _Arm('130300', '00', '04', '自行火炮(en)');
+  }
+  // 炮兵
+  if (RegExp(r'artillery|howitzer|артиллер|гаубиц').hasMatch(s)) {
+    return const _Arm('130300', '00', '00', '炮兵(en)');
+  }
+  // 防空
+  if (RegExp(r'air ?defen[cs]e|\bsam\b|\baaa\b|пво|зенит').hasMatch(s)) {
+    return const _Arm('130101', '00', '00', '防空(en)');
+  }
+  // 装甲 / 坦克
+  if (RegExp(r'\btank\b|armou?red|бронетанк|танков').hasMatch(s)) {
+    return const _Arm('120500', '00', '00', '装甲坦克(en)');
+  }
+  // 侦察
+  if (RegExp(r'recon|scout|развед').hasMatch(s)) {
+    return const _Arm('121300', '00', '00', '侦察(en)');
+  }
+  // 工兵
+  if (RegExp(r'engineer|сапёр|сапер|инженер').hasMatch(s)) {
+    return const _Arm('140700', '00', '00', '工兵(en)');
+  }
+  // 通信
+  if (RegExp(r'signal|communication|связ').hasMatch(s)) {
+    return const _Arm('111000', '00', '00', '通信(en)');
+  }
+  // 医疗
+  if (RegExp(r'medical|medical company|hospital|медицин').hasMatch(s)) {
+    return const _Arm('160800', '00', '00', '医疗(en)');
+  }
+  // 后勤 / 保障
+  if (RegExp(r'supply|logistic|transport|maintenance|снабж|ремонт|транспорт')
+      .hasMatch(s)) {
+    return const _Arm('160000', '00', '00', '后勤保障(en)');
+  }
+  // 陆军航空兵（陆地符号集，实体 120600）
+  if (RegExp(r'army aviation|aviation regiment|陆军航空').hasMatch(s)) {
+    return const _Arm('120600', '00', '00', '陆军航空兵(en)');
+  }
+  // 步兵 / 机械化 / 空降 / 陆战
+  if (RegExp(r'infantry|mechani[sz]ed|motor ?rifle|marine|airborne|paratroop|rifle|пехот|мотострелк|десант|морск')
+      .hasMatch(s)) {
+    final amphibious = RegExp(r'marine|морск').hasMatch(s);
+    return _Arm('121100', '00', amphibious ? '60' : '00', '步兵(en)');
+  }
+  return null;
 }
 
 class _Arm {

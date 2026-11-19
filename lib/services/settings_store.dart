@@ -10,11 +10,13 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
+import '../core/logger.dart';
+
 class SettingsStore {
   static const _obfuscKey = 'orbat-gen-v1';
 
   /// 配置文件 schema 版本。新增字段/改语义时递增，并在 _migrate 里写迁移逻辑。
-  static const int currentConfigVersion = 3;
+  static const int currentConfigVersion = 4;
 
   /// 已知模型预设（id → 显示名）。可自由填写不在列表里的模型 id。
   static const Map<String, String> knownModels = {
@@ -31,7 +33,7 @@ class SettingsStore {
   /// PNG 是否白底（false = 透明底，方便叠自定义背景图）
   bool whiteBackground;
 
-  /// 输出目录（空 = GUI 用桌面；CLI 用输入目录）。
+  /// 输出目录（空 = 用默认：exe 同级「输出文件存档\」）。
   /// 用户可通过「更改目录」按钮设置，持久化到 config.json。
   String outputDir;
 
@@ -43,6 +45,17 @@ class SettingsStore {
   bool emitJson;
   bool emitPng;
   bool emitSvg;
+
+  /// 全中文输出（v0.4，默认开）：
+  ///   true  → AI 输出的名称与注释都是中文（外文单位译名）
+  ///   false → 保留原文称号/番号/注释，便于与原图逐字对照
+  bool forceChinese;
+
+  /// 界面语言：'zh' / 'en'（默认跟随系统）
+  String language;
+
+  /// 是否已跑过首次启动自检（只自动跑一次，之后可在界面手动触发）
+  bool firstRunSelfCheckDone;
 
   /// 配置文件的 schema 版本（0 表示老版本、还没打版本号）
   int configVersion;
@@ -58,6 +71,9 @@ class SettingsStore {
     this.emitJson = true,
     this.emitPng = true,
     this.emitSvg = false,
+    this.forceChinese = true,
+    this.language = '',
+    this.firstRunSelfCheckDone = false,
     this.configVersion = currentConfigVersion,
   });
 
@@ -102,6 +118,11 @@ class SettingsStore {
         store.emitJson = map['emitJson'] as bool? ?? true;
         store.emitPng = map['emitPng'] as bool? ?? true;
         store.emitSvg = map['emitSvg'] as bool? ?? false;
+        // v4 新增字段：老配置没有这项时按"全中文"处理（保持老用户原有观感）
+        store.forceChinese = map['forceChinese'] as bool? ?? true;
+        store.language = (map['language'] ?? '').toString();
+        store.firstRunSelfCheckDone =
+            map['firstRunSelfCheckDone'] as bool? ?? false;
         store.configVersion = (map['configVersion'] as num?)?.toInt() ?? 0;
 
         // schema 迁移：版本落后时在此补齐新字段默认值。
@@ -112,8 +133,9 @@ class SettingsStore {
           await store.save();
         }
       }
-    } catch (_) {
-      // 配置损坏就用默认值，不阻塞启动
+    } catch (e) {
+      // 配置损坏就用默认值，不阻塞启动——但必须留痕，否则用户"设置总是不生效"查不出来
+      AppLogger.instance.warn('config', '读取 config.json 失败，使用默认值: $e');
     }
     return store;
   }
@@ -132,10 +154,15 @@ class SettingsStore {
         'emitJson': emitJson,
         'emitPng': emitPng,
         'emitSvg': emitSvg,
+        'forceChinese': forceChinese,
+        'language': language,
+        'firstRunSelfCheckDone': firstRunSelfCheckDone,
         'configVersion': configVersion,
       }));
-    } catch (_) {
-      // 写失败不阻塞使用
+    } catch (e) {
+      // 写失败不阻塞使用，但一定要记录：受控环境下 AppData 可能不可写，
+      // 表现为"改了设置、重启又变回去"，没有这行日志根本查不出来。
+      AppLogger.instance.warn('config', '写入 config.json 失败（设置将不会保存）: $e');
     }
   }
 

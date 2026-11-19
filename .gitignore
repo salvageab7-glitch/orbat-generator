@@ -9,8 +9,8 @@ build/
 # Flutter Windows 构建时生成的临时目录（含本机路径，勿提交）
 windows/flutter/ephemeral/
 
-# 开发期本地测试脚本与数据（不随仓库分发）
-test/
+# 开发期本地探测脚本（以下划线开头，不随仓库分发）；正式测试用例保留
+test/_*
 *.log
 orbat-logs/
 orbat-snapshots/

@@ -1,0 +1,96 @@
+<观察>
+方框计数：8
+2nd Division（师级总根，横向一条主线）
+2nd Division HQ（师部，主线直属）
+2nd Division Signals Regiment（通信团，主线直属）
+1st Brigade（第1旅，主线直属，向下三个方框）
+2nd Battalion（第2营，梯队码故意留错，用于回归）
+3rd Brigade（第3旅，主线直属，图中向下暂无方框）
+2nd Aviation Regiment (Helicopter)（航空团，主线下侧，方框内画直升机符号）
+</观察>
+<json>
+{
+  "options": {
+    "uniqueDesignation": "2nd Division",
+    "additionalInformation": "New South Wales",
+    "sidc": "130310002111000000000000000000"
+  },
+  "subOrganizations": [
+    {
+      "options": {
+        "uniqueDesignation": "2nd Division HQ",
+        "additionalInformation": "Paddington",
+        "sidc": "130310002111000000000000000000"
+      },
+      "subOrganizations": []
+    },
+    {
+      "options": {
+        "uniqueDesignation": "2nd Division Signals Regiment",
+        "additionalInformation": "Moore Park",
+        "sidc": "130310001711100000000000000000"
+      },
+      "subOrganizations": []
+    },
+    {
+      "options": {
+        "uniqueDesignation": "1st Brigade",
+        "additionalInformation": "Sydney",
+        "sidc": "130310001812110000000000000000"
+      },
+      "subOrganizations": [
+        {
+          "options": {
+            "uniqueDesignation": "1st Battalion",
+            "additionalInformation": "Kensington",
+            "sidc": "130310001612110000000000000000"
+          },
+          "subOrganizations": []
+        },
+        {
+          "options": {
+            "uniqueDesignation": "2nd Battalion",
+            "additionalInformation": "Liverpool",
+            "sidc": "130310001512110000000000000000"
+          },
+          "subOrganizations": []
+        },
+        {
+          "options": {
+            "uniqueDesignation": "4th Battalion",
+            "additionalInformation": "Parramatta",
+            "sidc": "130310001612110000000000000000"
+          },
+          "subOrganizations": []
+        }
+      ]
+    },
+    {
+      "options": {
+        "uniqueDesignation": "3rd Brigade",
+        "additionalInformation": "Townsville",
+        "sidc": "130310001812110000000000000000"
+      },
+      "subOrganizations": []
+    },
+    {
+      "options": {
+        "uniqueDesignation": "2nd Aviation Regiment (Helicopter)",
+        "additionalInformation": "Moore Park, Sydney, New South Wales",
+        "sidc": "130310001712060000000000000000"
+      },
+      "subOrganizations": []
+    }
+  ],
+  "commandLevels": "1"
+}
+</json>
+<自检>
+节点核对：JSON 8 个节点 / 方框 8 个
+判据：连线
+已删除（图上无对应方框，已从 JSON 移除）：
+  - 无
+待确认（图上看不清，已标 [?] 保留）：
+  - 无
+格式核对：SIDC 位数 ✓ / 名称与图中一致 ✓
+</自检>

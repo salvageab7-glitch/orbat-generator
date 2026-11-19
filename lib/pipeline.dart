@@ -15,6 +15,9 @@ import 'dart:isolate';
 import 'core/orbat.dart';
 import 'core/auto_fix.dart';
 import 'core/logger.dart';
+import 'core/dup_scan.dart';
+import 'core/patch_repair.dart';
+import 'core/sidc_audit.dart';
 import 'core/sidc_rule.dart';
 import 'ai/deepseek_client.dart';
 import 'ai/image_prep.dart';
@@ -41,6 +44,10 @@ class PipelineResult {
   /// 本次用的图块总数
   final int totalTiles;
 
+  /// SIDC 一致性审计发现并已修正的项（模型码 vs 本地规则）。
+  /// 这些不是"校验失败"，而是"模型给的码与名称不自洽"，修正后图才是对的。
+  final List<AuditIssue> auditIssues;
+
   PipelineResult({
     this.tree,
     this.report,
@@ -51,6 +58,7 @@ class PipelineResult {
     required this.elapsed,
     this.failedTiles = const [],
     this.totalTiles = 0,
+    this.auditIssues = const [],
   });
 
   bool get ok => tree != null && (report?.ok ?? false);
@@ -65,12 +73,16 @@ class OrbatPipeline {
   /// PNG 白底开关（false = 透明底）
   final bool whiteBackground;
 
+  /// 输出语言：true = JSON 全中文（名称译成中文）；false = 保留原文称号/番号/注释
+  final bool forceChinese;
+
   OrbatPipeline({
     required this.apiKey,
     this.model = 'deepseek-flash',
     this.renderScriptPath,
     this.maxRepairRounds = 2,
     this.whiteBackground = true,
+    this.forceChinese = true,
   });
 
   /// 从图片生成编制。
@@ -151,6 +163,7 @@ class OrbatPipeline {
           tile: t,
           isWideLayout: isWideLayout,
           extraText: extraText,
+          forceChinese: forceChinese,
         );
 
         final text = await client.generateTextFromImage(
@@ -249,8 +262,33 @@ class OrbatPipeline {
     // 已不再产生「旅部挂在营下」「炮兵」这类问题，这两步成了空转，
     // 还带来把正确结果改坏的风险（实测去重反而让节点数从 71 涨到 80），故移除。
 
+    // A4：跨父节点同名合并（分块边界常把同一单位挂到两个父节点下）
+    final dupLog = <String>[];
+    final dupMerged = autoMerge(merged, log: dupLog);
+    if (dupMerged > 0) {
+      log.info('dup', '跨块同名合并 $dupMerged 处');
+      for (final l in dupLog.take(20)) {
+        log.warn('dup', l);
+      }
+      onStage?.call('合并', '合并跨块重复单位 $dupMerged 处');
+    }
+
     // 先本地机械修复（SIDC 位数、括号、注释长度），避免模型重写整棵树丢数据
     merged = OrbatAutoFix.apply(merged);
+
+    // SIDC 一致性审计（v0.4 / A1）：模型给的码与名称不自洽时按名称裁决。
+    // 放在校验之前——审计修完，红牌数量才是真实水平。
+    final audit = SidcAudit.auditAndFix(merged);
+    merged = audit.tree;
+    final auditIssues = audit.issues;
+    if (auditIssues.isNotEmpty) {
+      log.info('audit', '一致性审计修正 ${auditIssues.length} 处');
+      for (final a in auditIssues.take(20)) {
+        log.warn('audit', '${a.path}: ${a.reason}');
+      }
+      onStage?.call('审计', '名称与 SIDC 不一致 ${auditIssues.length} 处，已按名称修正');
+    }
+
     var report = OrbatValidator.validate(merged);
     log.info('merge', '合并结果 $mergedBefore → ${merged.count} 节点, 层级 ${merged.maxDepth}, '
         '红牌 ${report.redCount} 软警告 ${report.warnCount}');
@@ -266,10 +304,7 @@ class OrbatPipeline {
       repairs++;
       onStage?.call('修复', '发现 ${report.redCount} 个红牌错误，第 $repairs 轮修复…');
       final redIssues = report.issues.where((i) => i.level == 'red').toList();
-      final repairPrompt = _buildRepairPrompt(
-          const JsonEncoder.withIndent('  ')
-              .convert(normalizeTree(merged, commandLevels: '3')),
-          redIssues);
+      final repairPrompt = _buildPatchPrompt(merged, redIssues);
       final c2 = DeepSeekClient(
         config: DeepSeekConfig(apiKey: apiKey, model: model),
         systemPrompt: kOrbatSystemPrompt,
@@ -279,8 +314,22 @@ class OrbatPipeline {
             onProgress: (p) => onStage?.call('修复', p));
         attempts += fixed.attempts;
         if (!fixed.ok) break;
-        merged = fixed.tree!;
+        // A3：只应用补丁，绝不替换整棵树（模型重写会丢节点，见 auto_fix.dart 注释）
+        final patches = parsePatchList(fixed.rawJson);
+        if (patches.isEmpty) {
+          onStage?.call('修复', '模型未返回可用补丁，保留本地修复结果');
+          break;
+        }
+        final res = applyPatches(merged, patches);
+        if (!res.ok) {
+          onStage?.call('修复', '补丁路径全部未命中，保留本地修复结果');
+          break;
+        }
+        merged = OrbatAutoFix.apply(res.tree);
         report = OrbatValidator.validate(merged);
+        onStage?.call('修复',
+            '第 $repairs 轮：应用 ${res.applied} 条补丁（跳过 ${res.skipped.length} 条），'
+            '红牌 ${report.redCount}');
       } finally {
         c2.close();
       }
@@ -306,6 +355,7 @@ class OrbatPipeline {
       elapsed: sw.elapsed,
       failedTiles: failedTiles,
       totalTiles: tiles.length,
+      auditIssues: auditIssues,
     );
   }
 
@@ -346,6 +396,9 @@ class OrbatPipeline {
       }
 
       var tree = OrbatAutoFix.apply(first.tree!);
+      // 文字模式同样过一遍一致性审计（A1），口径与图像模式一致
+      final audit = SidcAudit.auditAndFix(tree);
+      tree = audit.tree;
       var report = OrbatValidator.validate(tree);
       var attempts = first.attempts;
       var repairs = 0;
@@ -356,7 +409,7 @@ class OrbatPipeline {
         onStage?.call('修复', '发现 ${report.redCount} 个红牌错误，第 $repairs 轮修复…');
 
         final redIssues = report.issues.where((i) => i.level == 'red').toList();
-        final repairPrompt = _buildRepairPrompt(first.rawJson, redIssues);
+        final repairPrompt = _buildPatchPrompt(tree, redIssues);
 
         final fixed = await client.generateFromText(
           repairPrompt,
@@ -365,12 +418,18 @@ class OrbatPipeline {
         attempts += fixed.attempts;
 
         if (!fixed.ok) {
-          // 修复失败就保留原始结果，交给用户手工改
           onStage?.call('修复', '第 $repairs 轮修复未返回有效 JSON，保留原结果');
           break;
         }
 
-        tree = fixed.tree!;
+        // A3：补丁式修复，不接收整棵树
+        final patches = parsePatchList(fixed.rawJson);
+        final res = applyPatches(tree, patches);
+        if (patches.isEmpty || !res.ok) {
+          onStage?.call('修复', '模型未返回可用补丁，保留原结果');
+          break;
+        }
+        tree = OrbatAutoFix.apply(res.tree);
         report = OrbatValidator.validate(tree);
         onStage?.call('修复',
             '第 $repairs 轮完成：红牌 ${report.redCount}，软警告 ${report.warnCount}');
@@ -386,31 +445,77 @@ class OrbatPipeline {
         aiAttempts: attempts,
         repairRounds: repairs,
         elapsed: sw.elapsed,
+        auditIssues: audit.issues,
       );
     } finally {
       client.close();
     }
   }
 
-  /// 把校验错误组织成修复指令
-  String _buildRepairPrompt(String originalJson, List<ValidationIssue> issues) {
+  /// 补丁式修复指令（A3）：只给"有问题节点"的当前字段，要求模型回补丁。
+  ///
+  /// 为什么不再让模型返回整棵树：实测 176 节点的编制经模型"修一遍"只剩 32 个
+  /// （见 auto_fix.dart 开头注释）。补丁模式下模型输出极小，且路径不命中会被丢弃，
+  /// 最坏情况只是修不动，不会丢数据。
+  String _buildPatchPrompt(OrbatNode tree, List<ValidationIssue> issues) {
     final buf = StringBuffer();
-    buf.writeln('你上一次输出的编制 JSON 有 ${issues.length} 处错误，必须修正。');
+    buf.writeln('你上一次输出的编制 JSON 有 ${issues.length} 处必须修正的错误。');
+    buf.writeln('**只返回补丁，不要返回整棵树**（整树会被程序拒绝应用）。');
     buf.writeln();
-    buf.writeln('## 具体错误（路径 + 问题）');
+    buf.writeln('## 错误清单');
     for (final i in issues.take(30)) {
       buf.writeln('- ${i.path}: ${i.message}');
     }
     buf.writeln();
-    buf.writeln('## 上一次的输出');
-    // 不再截断：输出被截断会让模型基于残片重写，整棵树的数据会大量丢失
-    buf.writeln(originalJson);
+    buf.writeln('## 相关节点的当前内容');
+    final seen = <String>{};
+    for (final i in issues.take(30)) {
+      if (!seen.add(i.path)) continue;
+      final node = _nodeAt(tree, i.path);
+      if (node == null) continue;
+      buf.writeln(jsonEncode({
+        'path': i.path,
+        'uniqueDesignation': node.uniqueDesignation,
+        'additionalInformation': node.additionalInformation,
+        'sidc': node.sidc,
+      }));
+    }
     buf.writeln();
-    buf.writeln('## 要求');
-    buf.writeln('1. 保持原有的单位层级与名称不变，只修正错误字段。');
-    buf.writeln('2. 每个 sidc 必须正好 30 位数字，逐个数位核对。');
-    buf.writeln('3. 只输出修正后的完整 JSON，不要解释。');
+    buf.writeln('## 输出格式（严格）');
+    buf.writeln('{"patches":[{"path":"根/第1旅/第2营","sidc":"30位数字"}]}');
+    buf.writeln('规则：');
+    buf.writeln('1. path 必须与错误清单里的路径逐字一致，不要新建路径。');
+    buf.writeln('2. 只写要改的字段（sidc / name / note），没问题的字段不要出现。');
+    buf.writeln('3. sidc 必须正好 30 位数字；注释 ≤12 汉字或 ≤20 字母。');
+    buf.writeln('4. 不要新增、删除、移动任何节点。');
     return buf.toString();
+  }
+
+  /// 按「根/第1旅/第2营」路径取节点（与校验器拼路径的规则一致）
+  static OrbatNode? _nodeAt(OrbatNode root, String path) {
+    final segs = path
+        .split('/')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    if (segs.isNotEmpty && (segs.first == '根' || segs.first == 'root')) {
+      segs.removeAt(0);
+    }
+    if (segs.isNotEmpty && segs.first == root.uniqueDesignation) segs.removeAt(0);
+
+    var cur = root;
+    for (final seg in segs) {
+      OrbatNode? next;
+      for (final c in cur.children) {
+        if (c.uniqueDesignation == seg) {
+          next = c;
+          break;
+        }
+      }
+      if (next == null) return null;
+      cur = next;
+    }
+    return cur;
   }
 
   /// 出图。[onLog] 用于把渲染脚本的每一行输出实时推给界面。
@@ -434,7 +539,8 @@ class OrbatPipeline {
         whiteBackground: whiteBackground,
       ));
     final result = await renderer.render(
-      normalizedJson: normalizeTreeJson(tree),
+      // 只有送渲染器这一步才做名称长度适配；导出/保存的 JSON 保持原文
+      normalizedJson: normalizeTreeJson(tree, adaptForRender: true),
       outputBase: outputBase,
       onLog: onLog,
     );
@@ -462,9 +568,10 @@ class OrbatPipeline {
 /// 设 2 时，只有下属超过 8 个的分支才会纵向排列，2-3 个下属的分支一律横向铺开，
 /// 导致同一张图里有的分支竖着、有的横着，观感参差；
 /// 设 3 时全部按纵向展开，图也更紧凑（同一张法国团级图宽度从 3331 降到 1448）。
-String normalizeTreeJson(OrbatNode tree, {String commandLevels = '3'}) {
-  return const JsonEncoder.withIndent('  ')
-      .convert(normalizeTree(tree, commandLevels: commandLevels));
+String normalizeTreeJson(OrbatNode tree,
+    {String commandLevels = '3', bool adaptForRender = false}) {
+  return const JsonEncoder.withIndent('  ').convert(normalizeTree(tree,
+      commandLevels: commandLevels, adaptForRender: adaptForRender));
 }
 
 /// 从补充说明里解析出来的结构提示。
@@ -633,30 +740,41 @@ const String kTileSystemPrompt = r"""
 
 # 工作流程（必须遵守）
 1. **观察**：先在心里逐行扫描图片，看清有哪些单位、各自层级。
-   在 <观察> 段**只写 5-15 个关键单位**（根节点 + 各主要分支 + 容易看错的型号名），
+   <观察> 段的**第一行必须写** `方框计数：N`（这张图块里有几个独立的单位方框），
+   然后只列 5-15 个关键单位（根节点 + 各主要分支 + 容易看错的型号名），
    用来核对下面 JSON 没漏掉大枝。**不要把每个单位都列出来**——
    完整清单在 <json> 里写一次就够，观察段重复列一遍会耗尽 token 导致 JSON 被截断。
    看不清的标 [?]，不要猜。
 2. **构造**：按观察结果和连线关系构造 JSON。父子关系只看连线，不靠位置远近。
    图上所有单位都要进 JSON，一个都不能漏。
-3. **自检（交付前必须通过）**：做两件事——
-   a. 格式核对：SIDC 是否 30 位、名称是否与图中文字一致；
-   b. **逐框溯源**：对 <json> 里写下的**每一个节点**，回图确认它是否真有一个独立方框。
-      图上找不到对应框的，就是凭空生成，**必须从 JSON 里删掉**，
-      并在 <自检> 段列出「已删除：xxx（图上无此框）」。
-      看不清、不能 100% 确认的，保留但在名称后标 [?]，列入「待确认」清单。
+3. **自检（交付前必须通过）**：做三件事——
+   a. **节点核对**：数一遍 <json> 里的节点总数 M，与 `方框计数 N` 对比，
+      自检段必须写出 `节点核对：JSON M 个节点 / 方框 N 个`。
+      M 与 N 不一致时，回头找漏掉或多出的单位并改正（改完再核一次）。
+   b. 格式核对：SIDC 是否 30 位、名称是否与图中文字一致。
+   c. **逐框溯源**：对 <json> 里写下的每一个节点，回图确认它是否真有一个独立方框。
+      图上找不到对应框的就是凭空生成，**必须从 JSON 里删掉**，并在 <自检> 段列出
+      「已删除：xxx（图上无此框）」。看不清、不能 100% 确认的，保留但名称后标 [?]。
 
-# 编制图常识（判断层级的关键）
-一个旅/师通常下辖：若干营 + 若干直属分队。
-直属分队包括：旅部及旅部连、防空连、侦察连、工兵连、通信连、保障分队、防化连等。
-这些直属分队与各营是**平级**的，都直接连到旅/师那根横线上，
-不要因为它们画在某个营旁边或纵向对齐，就写成那个营的下属。
-判断依据只有一个：它们的连线是否单独接到上级横线——是，就是平级。
+# 层级判据（自检段必须声明用了哪一种）
+- 优先看**连线**：直属分队与各营是平级的，都单独接到上级横线；
+  不要因为它们画在某个营旁边或纵向对齐，就写成那个营的下属。
+- 没有连线时依次退化：横向缩进 → 纵向包含（父框把子框框在里面）。
+- 自检段必须写一行 `判据：连线` / `判据：缩进` / `判据：纵向包含`
+  （多种混用时写 `判据：连线+缩进`）。有"看起来从属但没画线"的判断要单独说明。
+- **层级深度完全由图上画法决定**，不要套用「师→旅→营→连」的固定惯例。
+  某个营下面没有连线、没有下级方框，就绝不能给它补「第1连/第2连/第3连」。
 
-**层级深度完全由连线决定，可能是 2 层、3 层或 4 层，不要套用「师→旅→营→连」的固定惯例。**
-反例：图上某个营下面只画到营这一格、没有向下的连线和连级方框，
-就绝不能自作主张给它建「第1连/第2连/第3连」——那是凭空生成，不是转写。
-图中画到哪一层就停在哪一层，宁可少一层，不要多一层。
+# 编制图常识
+一个旅/师通常下辖：若干营 + 若干直属分队（旅部及旅部连、防空连、侦察连、工兵连、
+通信连、保障分队、防化连等）。直属分队与各营平级。
+
+# 外文层级词 → 中文层级词（译名必须用表中的词，不得自由发挥）
+Division→师　Brigade→旅　Regiment→团　Battalion→营　Company→连　Platoon→排
+Squadron→营（骑兵/航空）　Troop→连（骑兵）　Battery→连（炮兵）　Squad→班　Team→组
+Corps→军　Army→集团军　Army Group→方面军　Theater→战区
+Дивизия→师　Бригада→旅　Полк→团　Батальон→营　Рота→连　Взвод→排　Батарея→炮兵连　Корпус→军
+（表里没有的按原意译，并在自检段列出该词）
 
 # SIDC 构造（30 位纯数字）
 格式：1303 | 符号集 | 00 | 梯队 | 主实体 | 类型 | 机动 | 扇区 | 00000000
@@ -672,19 +790,22 @@ const String kTileSystemPrompt = r"""
 梯队：14排 15连 16营 17团 18旅 21师 22军 23集团军
 主实体：110000司令部 121100步兵 121104步兵战车 120500装甲 120400反坦克
 　　　　130300炮兵 130301自行炮 130800迫击炮 130100防空 130101高炮 121300侦察
-　　　　140700工兵 160000勤务支援 160800医疗 111000通信
+　　　　140700工兵 160000勤务支援 160800医疗 111000通信 120600陆军航空兵
 类型：00默认 12=60mm 14=120mm 37反坦克武器 41多管火箭炮 56榴弹发射器
 机动：00徒步 04履带/自行 05轮式 06轮式装甲 23便携防空 60两栖
 
 # 输出格式
 严格按三段输出，顺序不可变，不要输出其他内容：
 <观察>
-（逐行列出看到的单位，可含连线关系说明）
+方框计数：N
+（5-15 个关键单位，标清层级）
 </观察>
 <json>
 {"options":{"uniqueDesignation":"名称","additionalInformation":"注释","sidc":"30位"},"subOrganizations":[...],"commandLevels":"1"}
 </json>
 <自检>
+节点核对：JSON M 个节点 / 方框 N 个
+判据：连线
 已删除（图上无对应方框，已从 JSON 移除）：
   - ...
 待确认（图上看不清，已标 [?] 保留）：
@@ -696,30 +817,33 @@ commandLevels 只在根节点出现；子节点不要写这个字段。
 
 # 铁律
 - 名称照抄图中文字，含型号，不得概括（「第1МТ-12炮连」不能写成「第1反坦克连」）
-- uniqueDesignation 只放单位名称，型号/口径/数量一律放 additionalInformation
-- 注释 ≤24 汉字，不写指挥官姓名
-- 名称里禁止「空格+左括号」
-- 名称里的层级词必须照抄（写「旅」不能写成「师」）
+- **部队称号并入名称**：荣誉名、地名冠名（如「近卫」「莫斯科」）写在
+  uniqueDesignation 里，不要塞进注释。
+- **注释只写两项内容**：驻地，或职能短名。硬上限 **12 个汉字（英文等拼音文字 20 个字母）**。
+  不写指挥官姓名，不写装备清单长句，不写自检说明。
+- 名称里禁止「空格+左括号」；层级词必须照抄（写「旅」不能写成「师」）。
 - 只写图中真实存在的单位，不推测、不补全其他区域。
   **每个节点都必须能在图上找到一个独立的方框**，画不出对应框的单位就是臆造，必须删掉。
 - **警惕「同构复制」脑补**：若同一上级下多个分支的子节点清单完全相同
-  （例如三个营都写着「营部+第1连+第2连+第3连」），这是典型的「看清一处就复制到其他处」
-  的臆造信号，**必须回图逐个分支确认**——很可能图上前两个营根本没画连级单位。
-  不要因为"编制上通常如此"就补齐，只画你真正看见的。
+  （三个营都写着「营部+第1连+第2连+第3连」），这是「看清一处就复制到其他处」的臆造信号，
+  **必须回图逐个分支确认**——很可能图上前两个营根本没画连级单位。
 - **营级及以上必须逐个建节点，禁止 ×N 合并**：师下属旅/团、旅下属营、团下属营、
-  军下属师/旅、集团军下属军/师/旅，这些单位都有自己的番号、装备和驻地，必须分开写。
-- **连、排级的同构单位可以合并**写成「××连×3」「××排×3」，
-  前提是它们之间没有需要标注的番号差异、装备差异或驻地差异；
-  如果每个连的装备或驻地不同，仍要逐个展开。
+  军下属师/旅、集团军下属军/师/旅，都必须分开写。
+- **连、排级的同构单位可以合并**写成「××连×3」，前提是没有番号/装备/驻地差异。
 """;
 
 /// 读图用的 user prompt —— 只说"这是哪一块"，规则不重复。
+///
+/// [forceChinese] 来自界面「全中文输出」开关（默认勾选）：
+///   true  → 名称与注释都输出中文（外文单位译名）
+///   false → 保留原文称号/番号，注释同样保留原文，便于与原图逐字对照
 String buildTileReadPrompt({
   required int index,
   required int total,
   required ImageTile tile,
   required bool isWideLayout,
   String? extraText,
+  bool forceChinese = true,
 }) {
   final b = StringBuffer();
 
@@ -728,10 +852,25 @@ String buildTileReadPrompt({
   } else {
     b.writeln('这是整张编制图的第 ${index + 1} 块（共 $total 块，${tile.label}），'
         '请按工作流程处理这部分。');
+    // 边界提醒（A4）：相邻块有 12% 重叠，被切断的单位不要猜全名
+    b.writeln('本块与相邻块有重叠区。落在本块边缘、方框被切断的单位，'
+        '只写看得见的部分并在名称后标 [?]，不要凭常识补全全名。');
     if (isWideLayout) {
       b.writeln('整图横向展开，当前是第 ${tile.col + 1} 列（共 ${tile.totalCols} 列）。'
           '${tile.col == 0 ? "最左侧通常是最顶层的总单位。" : "这块大概率是某个上级单位的下属分支。"}');
     }
+  }
+
+  // 输出语言：按钮级开关，单选题，放 user 里最清晰
+  b.writeln('');
+  if (forceChinese) {
+    b.writeln('输出语言：**全中文**。uniqueDesignation 必须用中文（外文单位按外文层级词表'
+        '译成规范中文军语）；additionalInformation 也用中文（驻地/职能短名）。'
+        '原文缩写可保留在注释里，但注释仍受 12 汉字上限约束。');
+  } else {
+    b.writeln('输出语言：**保留原文**。uniqueDesignation 用图中原文的称号与番号，'
+        '不要翻译（如「2nd Battalion, 12th Regiment」就照抄）；'
+        'additionalInformation 同样保留原文。层级判断仍按外文层级词表进行。');
   }
 
   if (extraText != null && extraText.trim().isNotEmpty) {
@@ -916,7 +1055,13 @@ OrbatNode mergeTileTrees(
     var bestScore = -1;
     for (var i = 0; i < trees.length; i++) {
       final score = _levelScore(trees[i].tree.uniqueDesignation);
-      if (score > bestScore) {
+      // 同分时取名称更短的：层级词一样时，短名更可能是纯层级总根
+      //（「2nd Division」优于「The Citizen Division 2nd …」）。
+      final shorter = score == bestScore &&
+          score > 0 &&
+          trees[i].tree.uniqueDesignation.length <
+              trees[rootIdx].tree.uniqueDesignation.length;
+      if (score > bestScore || shorter) {
         bestScore = score;
         rootIdx = i;
       }
@@ -951,6 +1096,29 @@ OrbatNode mergeTileTrees(
     }
 
     if (dup != null) {
+      // 字段级补全（0.3.1）：同名合并时残缺方的空注释/[?]注释/占位 SIDC
+      // 用另一方补全——否则先挂载的残缺版会把完整版的注释挤丢。
+      final noteBad = dup.additionalInformation.trim().isEmpty ||
+          dup.additionalInformation.contains('[?]');
+      final noteNewOk = node.additionalInformation.trim().isNotEmpty &&
+          !node.additionalInformation.contains('[?]');
+      final sidcBad = _isPlaceholderSidc(dup.sidc);
+      final sidcNewOk = !_isPlaceholderSidc(node.sidc);
+      if ((noteBad && noteNewOk) || (sidcBad && sidcNewOk)) {
+        final merged = OrbatNode(
+          uniqueDesignation: dup.uniqueDesignation,
+          additionalInformation:
+              noteBad && noteNewOk ? node.additionalInformation : dup.additionalInformation,
+          sidc: sidcBad && sidcNewOk ? node.sidc : dup.sidc,
+          children: dup.children,
+        );
+        parent.children.remove(dup);
+        parent.children.add(merged);
+        for (final c in node.children) {
+          attach(merged, c, depth + 1);
+        }
+        return;
+      }
       for (final c in node.children) {
         attach(dup, c, depth + 1);
       }
@@ -991,6 +1159,20 @@ OrbatNode mergeTileTrees(
       continue;
     }
 
+    // 块根与总根**同级**（0.3.1 新增）：同一单位被切块后的局部视图。
+    // 实测澳军 2 师图切 4 块，三块的根都是师级（The Citizen Division /
+    // 2nd Division HQ / 2nd Division），旧逻辑把它们整棵并列挂到总根下，
+    // 产图上出现两个平级的师，且同一旅的残缺版和完整版分属不同父节点
+    // 无法合并。此处直接提升其子节点到总根，跳过块根本身。
+    final tScore = _levelScore(t.uniqueDesignation);
+    final rootScore = _levelScore(root.uniqueDesignation);
+    if (tScore > 0 && tScore >= rootScore) {
+      for (final c in t.children.toList()) {
+        attach(root, c, 0);
+      }
+      continue;
+    }
+
     // 有分支提示就按名字归位
     String? matched;
     for (final b in hint?.branches ?? const <String>[]) {
@@ -1016,6 +1198,12 @@ OrbatNode mergeTileTrees(
   }
 
   return root;
+}
+
+/// SIDC 主实体段（10-15）全 0 视为占位（AI 没给出有效图标语义）
+bool _isPlaceholderSidc(String s) {
+  final body = s.length > 15 ? s.substring(10, 16) : '';
+  return body.isEmpty || body == '000000';
 }
 
 /// 判断两个名字是否指同一个单位。
@@ -1279,6 +1467,26 @@ int _levelScore(String name) {
       !name.contains('总指挥部') &&
       (name.endsWith('部') || name.contains('指挥部') || name.contains('司令部'))) {
     score = score ~/ 3;
+  }
+
+  // 英文军制图（澳/美/英式）：层级词判定与中文同构（0.3.1 新增）。
+  // 实测澳军图「The Citizen Division 2nd …」「2nd Division HQ」「2nd Division」
+  // 三个块根全是 0 分，导致总根选择退回位置启发式、三根并列挂载，
+  // 同一旅的残缺版和完整版落在不同父节点下无法去重。
+  if (score == 0) {
+    if (RegExp(r'Division(?!al)').hasMatch(n)) {
+      score = 60;
+    } else if (RegExp(r'Brigade|\bBde\b').hasMatch(n)) {
+      score = 50;
+    } else if (RegExp(r'Regiment').hasMatch(n)) {
+      score = 40;
+    } else if (RegExp(r'Battalion|\bBn\b').hasMatch(n)) {
+      score = 30;
+    } else if (RegExp(r'Company|\bCoy\b').hasMatch(n)) {
+      score = 20;
+    } else if (RegExp(r'\bCorps\b').hasMatch(n)) {
+      score = 70;
+    }
   }
   return score;
 }
