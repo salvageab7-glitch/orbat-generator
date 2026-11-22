@@ -45,13 +45,26 @@ class SelfCheck {
     String? renderScriptPath,
     String? apiKey,
     bool smokeRender = false,
+    String? outputDir,
+    int? mode,
   }) async {
     final items = <CheckItem>[];
     final log = AppLogger.instance;
     log.section('环境自检');
+    // 安卓端：出图走内置 WebView 线上渲染，Node/浏览器/渲染脚本三项均不适用
+    final isAndroid = Platform.isAndroid;
+    String? nodePath; // Windows 分支填充，冒烟用
+    String? script;   // Windows 分支填充，冒烟用
 
     // ---------- 1. Node.js ----------
-    final nodePath = _findNode();
+    if (isAndroid) {
+      items.add(CheckItem(
+        name: tr('Node.js'),
+        ok: true,
+        detail: tr('安卓端不需要（出图走内置 WebView）'),
+      ));
+    } else {
+    nodePath = _findNode();
     if (nodePath != null) {
       try {
         final r = await Process.run(nodePath, ['-v']);
@@ -80,8 +93,16 @@ class SelfCheck {
         fix: tr('安装 Node.js 24 或更高版本（出图依赖它）'),
       ));
     }
+    }
 
     // ---------- 2. 浏览器 ----------
+    if (isAndroid) {
+      items.add(CheckItem(
+        name: tr('浏览器（出图用）'),
+        ok: true,
+        detail: tr('安卓端使用内置 WebView'),
+      ));
+    } else {
     final browsers = _findBrowsers();
     items.add(CheckItem(
       name: tr('浏览器（出图用）'),
@@ -89,9 +110,17 @@ class SelfCheck {
       detail: browsers.isEmpty ? '未找到 Chrome / Edge' : browsers.join('、'),
       fix: browsers.isEmpty ? '出图需要 Chrome 或 Edge，请安装其一' : null,
     ));
+    }
 
     // ---------- 3. 渲染脚本 ----------
-    final script = renderScriptPath?.trim();
+    if (isAndroid) {
+      items.add(CheckItem(
+        name: tr('渲染脚本'),
+        ok: true,
+        detail: tr('安卓端不需要（出图走内置 WebView）'),
+      ));
+    } else {
+    script = renderScriptPath?.trim();
     if (script == null || script.isEmpty) {
       // 没配置时，看 exe 同级 runtime 里有没有
       final bundled = _bundledScript();
@@ -110,14 +139,20 @@ class SelfCheck {
         fix: f.existsSync() ? null : '该路径下找不到文件，请重新指定',
       ));
     }
+    }
 
     // ---------- 4. API Key ----------
+    // 模式三（Agent 全权）不需要软件 API：列为可选提示而非失败项
     final key = apiKey?.trim() ?? '';
+    final keyOptional = mode == 2 || isAndroid && mode == null;
     items.add(CheckItem(
       name: tr('API Key'),
       ok: key.isNotEmpty,
-      detail: key.isEmpty ? '未配置' : AppLogger.keyFingerprint(key),
-      fix: key.isEmpty ? '在设置里填入 DeepSeek API Key' : null,
+      optional: keyOptional,
+      detail: key.isEmpty
+          ? (keyOptional ? '未配置（当前模式不需要）' : '未配置')
+          : AppLogger.keyFingerprint(key),
+      fix: key.isEmpty && !keyOptional ? '在设置里填入 DeepSeek API Key' : null,
     ));
 
     // ---------- 5. 目录可写 ----------
@@ -132,7 +167,33 @@ class SelfCheck {
     ));
 
     // ---------- 6. 输出目录（编制档案） ----------
-    // 这里只检查"当前工作目录是否可写"，因为输出路径由用户在出图时选择
+    // Windows：检查"当前工作目录是否可写"（输出路径由用户在出图时选择）
+    // 安卓：Directory.current 是 / 永远不可写，改查实际使用的输出归档目录
+    if (isAndroid) {
+      final target = (outputDir ?? '').trim().isEmpty
+          ? Directory.systemTemp.path
+          : outputDir!.trim();
+      var outOk = true;
+      var outDetail = target;
+      try {
+        final d = Directory(target);
+        if (!d.existsSync()) d.createSync(recursive: true);
+        final probe =
+            File('${d.path}${Platform.pathSeparator}.write_probe');
+        probe.writeAsStringSync('ok');
+        probe.deleteSync();
+        outDetail = tr('产物输出目录可写');
+      } catch (_) {
+        outOk = false;
+        outDetail = '$target（不可写）';
+      }
+      items.add(CheckItem(
+        name: tr('输出目录可写'),
+        ok: outOk,
+        detail: outDetail,
+        fix: outOk ? null : '在设置里更换输出目录，或清理存储空间后重试',
+      ));
+    } else {
     var cwdOk = true;
     String cwdDetail = Directory.current.path;
     try {
@@ -150,6 +211,7 @@ class SelfCheck {
       detail: cwdDetail,
       fix: cwdOk ? null : '出图会写到这里，请换一个有写权限的位置',
     ));
+    }
 
     // ---------- 7. 网络（可选，不算失败） ----------
     final dsOk = await _tcpReachable('api.deepseek.com', 443);
@@ -176,7 +238,8 @@ class SelfCheck {
     // 这一项用内置的 3 节点固定 JSON 真渲染一次，把"能不能出图"变成确定性结论。
     if (smokeRender) {
       items.add(await _smokeRender(
-          nodePath: nodePath, script: script ?? _bundledScript()));
+          nodePath: isAndroid ? null : nodePath,
+          script: isAndroid ? null : (script ?? _bundledScript())));
     }
 
     for (final i in items) {
@@ -201,6 +264,16 @@ class SelfCheck {
     required String? script,
   }) async {
     final name = tr('出图冒烟（真渲染一次）');
+    // 安卓端：冒烟走 pipeline 渲染 hook 会弹出 WebView 页面，不适合放在自检里，
+    // 跳过（首次真实出图时自然验证）
+    if (Platform.isAndroid) {
+      return CheckItem(
+        name: name,
+        ok: true,
+        detail: tr('安卓端跳过（出图在首次使用时验证）'),
+        optional: true,
+      );
+    }
     if (nodePath == null) {
       return CheckItem(
         name: name,

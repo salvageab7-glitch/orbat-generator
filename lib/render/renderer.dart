@@ -24,6 +24,10 @@ class RenderResult {
   final Duration elapsed;
   final String? logPath;
 
+  /// 给界面看的过程提示（如“渲染前修正了 1 处梯队码”）。
+  /// 只用于日志展示，不影响出图结果；默认空。
+  final List<String> notices;
+
   RenderResult({
     required this.ok,
     this.svgPath,
@@ -31,7 +35,19 @@ class RenderResult {
     this.error,
     required this.elapsed,
     this.logPath,
+    this.notices = const [],
   });
+
+  /// 追加一条提示，返回新对象（原对象不变）。
+  RenderResult withNotice(String notice) => RenderResult(
+        ok: ok,
+        svgPath: svgPath,
+        pngPath: pngPath,
+        error: error,
+        elapsed: elapsed,
+        logPath: logPath,
+        notices: [...notices, notice],
+      );
 
   @override
   String toString() => ok
@@ -107,8 +123,9 @@ Future<Directory?> resolveWritableDir() async {
       final d = Directory(c);
       if (!d.existsSync()) await d.create(recursive: true);
       // 写探针确认真的有写权限（exists 不代表可写）
-      final probe =
-          File('${d.path}/.orbat_probe_${DateTime.now().microsecondsSinceEpoch}');
+      final probe = File(
+        '${d.path}/.orbat_probe_${DateTime.now().microsecondsSinceEpoch}',
+      );
       await probe.writeAsString('ok', flush: true);
       await probe.delete();
       return d;
@@ -303,31 +320,47 @@ class OrbatRenderer {
           .transform(utf8.decoder)
           .transform(const LineSplitter())
           .listen((line) {
-        outBuf.writeln(line);
-        log(line);
-      }).asFuture<void>().catchError((Object e) {
-        log('[client] stdout 读取中断: $e');
-      });
+            outBuf.writeln(line);
+            log(line);
+          })
+          .asFuture<void>()
+          .catchError((Object e) {
+            log('[client] stdout 读取中断: $e');
+          });
 
       final errDone = process.stderr
           .transform(utf8.decoder)
           .transform(const LineSplitter())
           .listen((line) {
-        errBuf.writeln(line);
-        log('[stderr] $line');
-      }).asFuture<void>().catchError((Object e) {
-        log('[client] stderr 读取中断: $e');
-      });
+            errBuf.writeln(line);
+            log('[stderr] $line');
+          })
+          .asFuture<void>()
+          .catchError((Object e) {
+            log('[client] stderr 读取中断: $e');
+          });
 
       int exitCode;
       try {
         exitCode = await process.exitCode.timeout(config.timeout);
       } on TimeoutException {
-        process.kill(ProcessSignal.sigkill);
+        // 先让 Node 执行 finally：关闭 CDP、终止 Chrome 并删除临时 profile；
+        // 只有协作关闭在 8 秒内未完成才强杀 Node，避免遗留浏览器资源。
+        try {
+          process.stdin.writeln('ORBAT_SHUTDOWN');
+          await process.stdin.flush();
+          await process.exitCode.timeout(const Duration(seconds: 8));
+        } catch (_) {
+          process.kill(ProcessSignal.sigkill);
+          try {
+            await process.exitCode.timeout(const Duration(seconds: 2));
+          } catch (_) {}
+        }
+        await Future.wait([outDone, errDone]);
         return finish(
           ok: false,
           error: '渲染超时（${config.timeout.inSeconds}s）。'
-              '看最后停在哪个阶段：「等待站点初始化」通常是网络无法访问'
+              '已请求清理 Chrome 和临时目录；看最后停在哪个阶段：「等待站点初始化」通常是网络无法访问'
               ' spatialillusions.com；「启动浏览器」则是本机 Chrome 起不来。',
         );
       }
@@ -339,38 +372,38 @@ class OrbatRenderer {
 
       if (exitCode != 0) {
         final envHint = _envHint(stderr);
-        final head = envHint ??
-            (exitCode == 2 ? 'Node.js 版本不符（需 ≥ 24）' : '请查看下方日志定位原因');
+        final head =
+            envHint ?? (exitCode == 2 ? 'Node.js 版本不符（需 ≥ 24）' : '请查看下方日志定位原因');
         return finish(
           ok: false,
-          error: '渲染失败（退出码 $exitCode）：$head\n${_tail(stderr)}\n${_tail(stdout)}',
+          error:
+              '渲染失败（退出码 $exitCode）：$head\n${_tail(stderr)}\n${_tail(stdout)}',
         );
       }
 
       // ---- 5) 解析产物 ----
-      final svg = RegExp(r'^SVG_FILE (.+?\.svg)', multiLine: true)
-          .firstMatch(stdout)
-          ?.group(1)
-          ?.trim();
+      final svg = RegExp(
+        r'^SVG_FILE (.+?\.svg)',
+        multiLine: true,
+      ).firstMatch(stdout)?.group(1)?.trim();
       // 路径可能含空格（根节点名如「2nd Division(New South Wales)」会进入文件名），
       // 用 \S+ 会在空格处截断，导致误判"PNG 未生成"。匹配到 .png 结尾为止。
-      final png = RegExp(r'^PNG_FILE (.+?\.png)', multiLine: true)
-          .firstMatch(stdout)
-          ?.group(1)
-          ?.trim();
+      final png = RegExp(
+        r'^PNG_FILE (.+?\.png)',
+        multiLine: true,
+      ).firstMatch(stdout)?.group(1)?.trim();
 
       if (png == null) {
-        return finish(
-          ok: false,
-          error: '脚本未返回 PNG 路径，输出如下：\n${_tail(stdout)}',
-        );
+        return finish(ok: false, error: '脚本未返回 PNG 路径，输出如下：\n${_tail(stdout)}');
       }
 
       final pngFile = File(png);
       if (!pngFile.existsSync() || pngFile.lengthSync() == 0) {
         return finish(ok: false, error: 'PNG 未生成或为空: $png');
       }
-      log('[client] PNG 已生成 ${(pngFile.lengthSync() / 1024).toStringAsFixed(0)} KB');
+      log(
+        '[client] PNG 已生成 ${(pngFile.lengthSync() / 1024).toStringAsFixed(0)} KB',
+      );
 
       return finish(ok: true, png: png, svg: svg);
     } catch (e, st) {

@@ -1,8 +1,8 @@
-# Mode 3 · External Agent Quick Start (English)
+﻿# Mode 3 · External Agent Quick Start (English)
 
 > **For**: GPT-4o / GPT-5, Claude (Sonnet/Opus 3.5+), Gemini 1.5+ and other **vision-capable** English-speaking agents.
 > **Not for**: text-only models. If you cannot see images, use the fallback in §0.
-> **Version**: orbat-cli v0.3.5. Run every command from the folder that contains `orbat-cli.exe`.
+> **Version**: orbat-cli v0.3.6. Run every command from the folder that contains `orbat-cli.exe`.
 
 ---
 

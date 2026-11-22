@@ -19,11 +19,11 @@ enum LogLevel { debug, info, warn, error }
 
 extension LogLevelX on LogLevel {
   String get label => switch (this) {
-        LogLevel.debug => 'DEBUG',
-        LogLevel.info => 'INFO ',
-        LogLevel.warn => 'WARN ',
-        LogLevel.error => 'ERROR',
-      };
+    LogLevel.debug => 'DEBUG',
+    LogLevel.info => 'INFO ',
+    LogLevel.warn => 'WARN ',
+    LogLevel.error => 'ERROR',
+  };
 }
 
 class AppLogger {
@@ -147,10 +147,7 @@ class AppLogger {
 
   void _cleanupOldSnapshots() {
     try {
-      final files = _snapDir!
-          .listSync()
-          .whereType<File>()
-          .toList()
+      final files = _snapDir!.listSync().whereType<File>().toList()
         ..sort((a, b) => b.lastModifiedSync().compareTo(a.lastModifiedSync()));
       for (var i = maxSnapshots; i < files.length; i++) {
         try {
@@ -254,17 +251,15 @@ class AppLogger {
 
   static String _stamp({bool withMs = false}) {
     final d = DateTime.now();
-    final base = '${d.year}-${_two(d.month)}-${_two(d.day)} '
+    final base =
+        '${d.year}-${_two(d.month)}-${_two(d.day)} '
         '${_two(d.hour)}:${_two(d.minute)}:${_two(d.second)}';
     return withMs ? '$base.${d.millisecond.toString().padLeft(3, '0')}' : base;
   }
 
-  /// API Key 指纹：前 6 位 + 长度，足够区分又不泄露
-  static String keyFingerprint(String? key) {
-    if (key == null || key.isEmpty) return '(未配置)';
-    if (key.length <= 8) return '***';
-    return '${key.substring(0, 6)}…(${key.length}位)';
-  }
+  /// 不在诊断日志或界面中暴露 API Key 字符、前缀或长度。
+  static String keyFingerprint(String? key) =>
+      key == null || key.isEmpty ? '(未配置)' : '已配置（隐藏）';
 
   String? get sessionTag => _sessionTag;
 

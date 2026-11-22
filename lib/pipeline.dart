@@ -100,8 +100,11 @@ class OrbatPipeline {
     log.section('识别: ${image.path}');
     final bytes = await image.readAsBytes();
     final mime = _mimeOf(image.path);
-    log.info('image', '文件 ${(bytes.length / 1024).toStringAsFixed(0)}KB, 类型 $mime, '
-        'key=${AppLogger.keyFingerprint(apiKey)}, model=$model');
+    log.info(
+      'image',
+      '文件 ${(bytes.length / 1024).toStringAsFixed(0)}KB, 类型 $mime, '
+          'key=${AppLogger.keyFingerprint(apiKey)}, model=$model',
+    );
 
     // ---- 1) 预处理：判断整张发还是切片 ----
     //
@@ -138,9 +141,15 @@ class OrbatPipeline {
     // 实测同一块图，只问名称能 11 个单位全对；带上完整 SIDC 规范就会
     // 出现「第1MT连」这类截断和「无法识别」占位。SIDC 交给本地规则引擎。
     onStage?.call('切片', plan.summary);
-    log.info('slice', '${plan.summary} | 原图 ${plan.srcWidth}×${plan.srcHeight}');
+    log.info(
+      'slice',
+      '${plan.summary} | 原图 ${plan.srcWidth}×${plan.srcHeight}',
+    );
     for (final t in plan.tiles) {
-      log.debug('slice', '${t.label} 裁切 ${t.srcW}×${t.srcH} @(${t.srcX},${t.srcY}) → ${t.sizeKb}KB');
+      log.debug(
+        'slice',
+        '${t.label} 裁切 ${t.srcW}×${t.srcH} @(${t.srcX},${t.srcY}) → ${t.sizeKb}KB',
+      );
     }
     final client = DeepSeekClient(
       config: DeepSeekConfig(apiKey: apiKey, model: model),
@@ -190,8 +199,10 @@ class OrbatPipeline {
         // 重试只会再等一轮（实测让整张图从 37 秒拖到 219 秒），得不偿失。
         final retryAllowed = tiles.length <= 2;
         if ((tree == null || tree.count < 3) && retryAllowed) {
-          onStage?.call('分块识别',
-              '${t.label} 有效内容过少（${tree?.count ?? 0} 节点），重试…');
+          onStage?.call(
+            '分块识别',
+            '${t.label} 有效内容过少（${tree?.count ?? 0} 节点），重试…',
+          );
           final text2 = await client.generateTextFromImage(
             imageBytes: t.png,
             mimeType: 'image/png',
@@ -200,8 +211,7 @@ class OrbatPipeline {
                 '把能辨认的单位都输出（宁少勿编），名称务必完整。',
           );
           attempts++;
-          final jsonBlock2 =
-              text2 != null ? extractJsonBlock(text2) : null;
+          final jsonBlock2 = text2 != null ? extractJsonBlock(text2) : null;
           if (jsonBlock2 != null) {
             try {
               final p2 = jsonDecode(jsonBlock2) as Map<String, dynamic>;
@@ -212,11 +222,16 @@ class OrbatPipeline {
         }
 
         if (tree != null && tree.count >= 1) {
-          log.info('tile', '${t.label} → ${tree.count} 节点, 根「${tree.uniqueDesignation}」');
+          log.info(
+            'tile',
+            '${t.label} → ${tree.count} 节点, 根「${tree.uniqueDesignation}」',
+          );
           trees.add((tree: tree, tile: t));
-          onStage?.call('分块识别',
-              '${t.label} 完成：${tree.count} 节点，根「${tree.uniqueDesignation}」'
-              '（累计 ${trees.length}/${tiles.length} 块）');
+          onStage?.call(
+            '分块识别',
+            '${t.label} 完成：${tree.count} 节点，根「${tree.uniqueDesignation}」'
+                '（累计 ${trees.length}/${tiles.length} 块）',
+          );
         } else {
           onStage?.call('分块识别', '${t.label} 无有效内容，跳过');
           failedTiles.add({
@@ -248,12 +263,17 @@ class OrbatPipeline {
     // ---- 3) 合并 ----
     final hint = parseStructureHint(extraText);
     if (!hint.isEmpty) {
-      onStage?.call('合并',
-          '使用结构提示：总根 ${hint.rootName ?? "（自动判断）"}'
-          '${hint.branches.isEmpty ? "" : "，分支 ${hint.branches.join("、")}"}');
+      onStage?.call(
+        '合并',
+        '使用结构提示：总根 ${hint.rootName ?? "（自动判断）"}'
+            '${hint.branches.isEmpty ? "" : "，分支 ${hint.branches.join("、")}"}',
+      );
     }
     onStage?.call('合并', '正在合并 ${trees.length} 块结果…');
-    log.info('merge', '开始合并 ${trees.length} 块, 提示=${hint.isEmpty ? "无" : hint}');
+    log.info(
+      'merge',
+      '开始合并 ${trees.length} 块, 提示=${hint.isEmpty ? "无" : hint}',
+    );
     var merged = mergeTileTrees(trees, hint: hint);
     final mergedBefore = merged.count;
 
@@ -290,13 +310,18 @@ class OrbatPipeline {
     }
 
     var report = OrbatValidator.validate(merged);
-    log.info('merge', '合并结果 $mergedBefore → ${merged.count} 节点, 层级 ${merged.maxDepth}, '
-        '红牌 ${report.redCount} 软警告 ${report.warnCount}');
+    log.info(
+      'merge',
+      '合并结果 $mergedBefore → ${merged.count} 节点, 层级 ${merged.maxDepth}, '
+          '红牌 ${report.redCount} 软警告 ${report.warnCount}',
+    );
     for (final i in report.issues.take(20)) {
       log.warn('validate', '${i.level} ${i.path}: ${i.message}');
     }
-    onStage?.call('合并',
-        '合并 ${trees.length} 块 → $mergedBefore 节点，本地修复后红牌 ${report.redCount}');
+    onStage?.call(
+      '合并',
+      '合并 ${trees.length} 块 → $mergedBefore 节点，本地修复后红牌 ${report.redCount}',
+    );
     var repairs = 0;
 
     // 合并后仍可能有红牌，走一次修复
@@ -310,8 +335,10 @@ class OrbatPipeline {
         systemPrompt: kOrbatSystemPrompt,
       );
       try {
-        final fixed = await c2.generateFromText(repairPrompt,
-            onProgress: (p) => onStage?.call('修复', p));
+        final fixed = await c2.generateFromText(
+          repairPrompt,
+          onProgress: (p) => onStage?.call('修复', p),
+        );
         attempts += fixed.attempts;
         if (!fixed.ok) break;
         // A3：只应用补丁，绝不替换整棵树（模型重写会丢节点，见 auto_fix.dart 注释）
@@ -327,24 +354,26 @@ class OrbatPipeline {
         }
         merged = OrbatAutoFix.apply(res.tree);
         report = OrbatValidator.validate(merged);
-        onStage?.call('修复',
-            '第 $repairs 轮：应用 ${res.applied} 条补丁（跳过 ${res.skipped.length} 条），'
-            '红牌 ${report.redCount}');
+        onStage?.call(
+          '修复',
+          '第 $repairs 轮：应用 ${res.applied} 条补丁（跳过 ${res.skipped.length} 条），'
+              '红牌 ${report.redCount}',
+        );
       } finally {
         c2.close();
       }
     }
 
-    onStage?.call('完成',
-        '合并 ${trees.length} 块 → ${merged.count} 节点，层级 ${merged.maxDepth}，红牌 ${report.redCount}');
-
-    final jsonStr = normalizeTreeJson(merged);
-    await AppLogger.instance.saveSnapshot(
-      merged.uniqueDesignation,
-      json: jsonStr,
+    onStage?.call(
+      '完成',
+      '合并 ${trees.length} 块 → ${merged.count} 节点，层级 ${merged.maxDepth}，红牌 ${report.redCount}',
     );
-    log.info('pipeline', '识别完成: ${merged.count} 节点, 层级 ${merged.maxDepth}, '
-        'AI 调用 $attempts 次, 修复 $repairs 轮, 用时 ${sw.elapsed.inSeconds}s');
+
+    log.info(
+      'pipeline',
+      '识别完成: ${merged.count} 节点, 层级 ${merged.maxDepth}, '
+          'AI 调用 $attempts 次, 修复 $repairs 轮, 用时 ${sw.elapsed.inSeconds}s',
+    );
 
     return PipelineResult(
       tree: merged,
@@ -360,16 +389,15 @@ class OrbatPipeline {
   }
 
   /// 从文字生成编制
-  Future<PipelineResult> fromText(
-    String text, {
-    StageCallback? onStage,
-  }) async {
+  Future<PipelineResult> fromText(String text, {StageCallback? onStage}) async {
     final sw = Stopwatch()..start();
     return _generate(
       onStage: onStage,
       sw: sw,
-      callAi: (client) =>
-          client.generateFromText(text, onProgress: (p) => onStage?.call('识别', p)),
+      callAi: (client) => client.generateFromText(
+        text,
+        onProgress: (p) => onStage?.call('识别', p),
+      ),
     );
   }
 
@@ -431,12 +459,16 @@ class OrbatPipeline {
         }
         tree = OrbatAutoFix.apply(res.tree);
         report = OrbatValidator.validate(tree);
-        onStage?.call('修复',
-            '第 $repairs 轮完成：红牌 ${report.redCount}，软警告 ${report.warnCount}');
+        onStage?.call(
+          '修复',
+          '第 $repairs 轮完成：红牌 ${report.redCount}，软警告 ${report.warnCount}',
+        );
       }
 
-      onStage?.call('完成',
-          '生成 ${tree.count} 节点，层级 ${tree.maxDepth}，红牌 ${report.redCount}');
+      onStage?.call(
+        '完成',
+        '生成 ${tree.count} 节点，层级 ${tree.maxDepth}，红牌 ${report.redCount}',
+      );
 
       return PipelineResult(
         tree: tree,
@@ -473,12 +505,14 @@ class OrbatPipeline {
       if (!seen.add(i.path)) continue;
       final node = _nodeAt(tree, i.path);
       if (node == null) continue;
-      buf.writeln(jsonEncode({
-        'path': i.path,
-        'uniqueDesignation': node.uniqueDesignation,
-        'additionalInformation': node.additionalInformation,
-        'sidc': node.sidc,
-      }));
+      buf.writeln(
+        jsonEncode({
+          'path': i.path,
+          'uniqueDesignation': node.uniqueDesignation,
+          'additionalInformation': node.additionalInformation,
+          'sidc': node.sidc,
+        }),
+      );
     }
     buf.writeln();
     buf.writeln('## 输出格式（严格）');
@@ -501,7 +535,8 @@ class OrbatPipeline {
     if (segs.isNotEmpty && (segs.first == '根' || segs.first == 'root')) {
       segs.removeAt(0);
     }
-    if (segs.isNotEmpty && segs.first == root.uniqueDesignation) segs.removeAt(0);
+    if (segs.isNotEmpty && segs.first == root.uniqueDesignation)
+      segs.removeAt(0);
 
     var cur = root;
     for (final seg in segs) {
@@ -521,7 +556,9 @@ class OrbatPipeline {
   /// 安卓端出图 hook：由 UI 层注册（导航到 WebView 渲染页并 await 结果）。
   /// Windows/CLI 不注册 → 走下面的本地渲染脚本路径。
   static Future<RenderResult> Function(
-      String normalizedJson, String outputBase)? androidRenderHook;
+    String normalizedJson,
+    String outputBase,
+  )? androidRenderHook;
 
   /// 出图。[onLog] 用于把渲染脚本的每一行输出实时推给界面。
   Future<RenderResult> render(
@@ -530,6 +567,22 @@ class OrbatPipeline {
     StageCallback? onStage,
     void Function(String line)? onLog,
   }) async {
+    // 只对“送渲染”的副本做梯队兜底；源 tree 保持原样，保存/导出的 JSON 不被悄悄改写。
+    final echelonFix = OrbatAutoFix.fixEchelonReport(tree);
+    final renderTree = echelonFix.tree;
+    final fixNotice = echelonFix.fixed == 0
+        ? null
+        : '渲染前按名称修正 ${echelonFix.fixed} 处梯队码（仅影响本次渲染，源 JSON 未改）';
+    if (fixNotice != null) {
+      onStage?.call('修正', fixNotice);
+      AppLogger.instance.warn('render', fixNotice);
+    }
+
+    RenderResult addNotice(RenderResult result) {
+      final notice = fixNotice;
+      return notice == null ? result : result.withNotice(notice);
+    }
+
     // 安卓：无 node/桌面浏览器，出图交给 WebView 线上渲染（方案 A）
     if (Platform.isAndroid) {
       final hook = androidRenderHook;
@@ -543,13 +596,15 @@ class OrbatPipeline {
       }
       onStage?.call('出图', '正在联网渲染（约 15-60 秒）…');
       final result = await hook(
-          normalizeTreeJson(tree,
-              commandLevels: _resolveCommandLevels(tree),
-              adaptForRender: true),
-          outputBase);
-      onStage?.call(
-          '出图', result.ok ? '出图完成' : '出图失败：${result.error}');
-      return result;
+        normalizeTreeJson(
+          renderTree,
+          commandLevels: _resolveCommandLevels(renderTree),
+          adaptForRender: true,
+        ),
+        outputBase,
+      );
+      onStage?.call('出图', result.ok ? '出图完成' : '出图失败：${result.error}');
+      return addNotice(result);
     }
 
     final script = renderScriptPath;
@@ -561,14 +616,16 @@ class OrbatPipeline {
       );
     }
     onStage?.call('出图', '正在调用线上渲染器（联网，约 15-60 秒）…');
-    final renderer = OrbatRenderer(RendererConfig(
-        scriptPath: script,
-        whiteBackground: whiteBackground,
-      ));
+    final renderer = OrbatRenderer(
+      RendererConfig(scriptPath: script, whiteBackground: whiteBackground),
+    );
     final result = await renderer.render(
       // 只有送渲染器这一步才做名称长度适配；导出/保存的 JSON 保持原文
-      normalizedJson: normalizeTreeJson(tree,
-          commandLevels: _resolveCommandLevels(tree), adaptForRender: true),
+      normalizedJson: normalizeTreeJson(
+        renderTree,
+        commandLevels: _resolveCommandLevels(renderTree),
+        adaptForRender: true,
+      ),
       outputBase: outputBase,
       onLog: onLog,
     );
@@ -577,7 +634,7 @@ class OrbatPipeline {
     } else {
       onStage?.call('出图', '出图失败：${result.error}');
     }
-    return result;
+    return addNotice(result);
   }
 
   static String _mimeOf(String path) {
@@ -604,10 +661,18 @@ String _resolveCommandLevels(OrbatNode tree) {
   return raw == '2' ? '2' : '3';
 }
 
-String normalizeTreeJson(OrbatNode tree,
-    {String commandLevels = '3', bool adaptForRender = false}) {
-  return const JsonEncoder.withIndent('  ').convert(normalizeTree(tree,
-      commandLevels: commandLevels, adaptForRender: adaptForRender));
+String normalizeTreeJson(
+  OrbatNode tree, {
+  String commandLevels = '3',
+  bool adaptForRender = false,
+}) {
+  return const JsonEncoder.withIndent('  ').convert(
+    normalizeTree(
+      tree,
+      commandLevels: commandLevels,
+      adaptForRender: adaptForRender,
+    ),
+  );
 }
 
 /// 从补充说明里解析出来的结构提示。
@@ -638,11 +703,7 @@ class StructureHint {
   /// 解析出的骨架树（骨架版才有）
   final OrbatNode? skeleton;
 
-  const StructureHint({
-    this.rootName,
-    this.branches = const [],
-    this.skeleton,
-  });
+  const StructureHint({this.rootName, this.branches = const [], this.skeleton});
 
   bool get isEmpty => rootName == null && branches.isEmpty && skeleton == null;
 
@@ -659,8 +720,8 @@ StructureHint parseStructureHint(String? text) {
   // ---- 显式标注的总根 ----
   String? root;
   final rootMatch = RegExp(
-          r'(?:总根|根单位|最高单位|顶层单位|总称|上级单位)\s*[:：]\s*([^\n\r，,；;]+)')
-      .firstMatch(t);
+    r'(?:总根|根单位|最高单位|顶层单位|总称|上级单位)\s*[:：]\s*([^\n\r，,；;]+)',
+  ).firstMatch(t);
   if (rootMatch != null) {
     root = rootMatch.group(1)!.trim();
     if (root.isEmpty) root = null;
@@ -668,14 +729,16 @@ StructureHint parseStructureHint(String? text) {
 
   // ---- 显式标注的二级分支 ----
   final branches = <String>[];
-  final brMatch = RegExp(r'(?:下辖|下属|二级单位|分支|直属)\s*[:：]\s*([^\n\r]+)')
-      .firstMatch(t);
+  final brMatch =
+      RegExp(r'(?:下辖|下属|二级单位|分支|直属)\s*[:：]\s*([^\n\r]+)').firstMatch(t);
   if (brMatch != null) {
-    branches.addAll(brMatch
-        .group(1)!
-        .split(RegExp(r'[、,，;；/]'))
-        .map((s) => s.trim())
-        .where((s) => s.isNotEmpty));
+    branches.addAll(
+      brMatch
+          .group(1)!
+          .split(RegExp(r'[、,，;；/]'))
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty),
+    );
   }
 
   // ---- 骨架版：按缩进解析 ----
@@ -684,11 +747,7 @@ StructureHint parseStructureHint(String? text) {
     root = skeleton.uniqueDesignation;
   }
 
-  return StructureHint(
-    rootName: root,
-    branches: branches,
-    skeleton: skeleton,
-  );
+  return StructureHint(rootName: root, branches: branches, skeleton: skeleton);
 }
 
 /// 从文本里解析出缩进树；解析不出层级（只有一行或没有缩进）时返回 null
@@ -706,8 +765,7 @@ OrbatNode? _parseSkeleton(String text) {
 
     if (line.isEmpty) continue;
     // 跳过"总根：""下辖："这类说明行
-    if (RegExp(r'^(总根|根单位|最高单位|顶层单位|下辖|下属|二级单位|分支|直属|补充说明)')
-        .hasMatch(line)) {
+    if (RegExp(r'^(总根|根单位|最高单位|顶层单位|下辖|下属|二级单位|分支|直属|补充说明)').hasMatch(line)) {
       continue;
     }
     // 名字太长的不像单位名
@@ -719,7 +777,8 @@ OrbatNode? _parseSkeleton(String text) {
   if (entries.length < 2) return null;
 
   // 至少要有两级缩进，否则不算骨架
-  final minIndent = entries.map((e) => e.indent).reduce((a, b) => a < b ? a : b);
+  final minIndent =
+      entries.map((e) => e.indent).reduce((a, b) => a < b ? a : b);
   final hasNesting = entries.any((e) => e.indent > minIndent);
   if (!hasNesting) return null;
 
@@ -731,7 +790,9 @@ OrbatNode? _parseSkeleton(String text) {
   );
 
   // 用缩进栈构建
-  final stack = <({int indent, OrbatNode node})>[(indent: rootEntry.indent, node: root)];
+  final stack = <({int indent, OrbatNode node})>[
+    (indent: rootEntry.indent, node: root),
+  ];
   for (final e in entries.skip(1)) {
     while (stack.length > 1 && stack.last.indent >= e.indent) {
       stack.removeLast();
@@ -885,27 +946,37 @@ String buildTileReadPrompt({
   if (total <= 1) {
     b.writeln('请按工作流程处理这整张编制图。');
   } else {
-    b.writeln('这是整张编制图的第 ${index + 1} 块（共 $total 块，${tile.label}），'
-        '请按工作流程处理这部分。');
+    b.writeln(
+      '这是整张编制图的第 ${index + 1} 块（共 $total 块，${tile.label}），'
+      '请按工作流程处理这部分。',
+    );
     // 边界提醒（A4）：相邻块有 12% 重叠，被切断的单位不要猜全名
-    b.writeln('本块与相邻块有重叠区。落在本块边缘、方框被切断的单位，'
-        '只写看得见的部分并在名称后标 [?]，不要凭常识补全全名。');
+    b.writeln(
+      '本块与相邻块有重叠区。落在本块边缘、方框被切断的单位，'
+      '只写看得见的部分并在名称后标 [?]，不要凭常识补全全名。',
+    );
     if (isWideLayout) {
-      b.writeln('整图横向展开，当前是第 ${tile.col + 1} 列（共 ${tile.totalCols} 列）。'
-          '${tile.col == 0 ? "最左侧通常是最顶层的总单位。" : "这块大概率是某个上级单位的下属分支。"}');
+      b.writeln(
+        '整图横向展开，当前是第 ${tile.col + 1} 列（共 ${tile.totalCols} 列）。'
+        '${tile.col == 0 ? "最左侧通常是最顶层的总单位。" : "这块大概率是某个上级单位的下属分支。"}',
+      );
     }
   }
 
   // 输出语言：按钮级开关，单选题，放 user 里最清晰
   b.writeln('');
   if (forceChinese) {
-    b.writeln('输出语言：**全中文**。uniqueDesignation 必须用中文（外文单位按外文层级词表'
-        '译成规范中文军语）；additionalInformation 也用中文（驻地/职能短名）。'
-        '原文缩写可保留在注释里，但注释仍受 12 汉字上限约束。');
+    b.writeln(
+      '输出语言：**全中文**。uniqueDesignation 必须用中文（外文单位按外文层级词表'
+      '译成规范中文军语）；additionalInformation 也用中文（驻地/职能短名）。'
+      '原文缩写可保留在注释里，但注释仍受 12 汉字上限约束。',
+    );
   } else {
-    b.writeln('输出语言：**保留原文**。uniqueDesignation 用图中原文的称号与番号，'
-        '不要翻译（如「2nd Battalion, 12th Regiment」就照抄）；'
-        'additionalInformation 同样保留原文。层级判断仍按外文层级词表进行。');
+    b.writeln(
+      '输出语言：**保留原文**。uniqueDesignation 用图中原文的称号与番号，'
+      '不要翻译（如「2nd Battalion, 12th Regiment」就照抄）；'
+      'additionalInformation 同样保留原文。层级判断仍按外文层级词表进行。',
+    );
   }
 
   if (extraText != null && extraText.trim().isNotEmpty) {
@@ -962,7 +1033,10 @@ OrbatNode? parseUnitList(String text) {
       }
     }
     // 注释两侧的括号去掉，名称行尾残留的分隔符去掉
-    note = note.replaceAll(RegExp(r'^[（(]'), '').replaceAll(RegExp(r'[）)]$'), '').trim();
+    note = note
+        .replaceAll(RegExp(r'^[（(]'), '')
+        .replaceAll(RegExp(r'[）)]$'), '')
+        .trim();
     name = name.replaceAll(RegExp(r'[:：|｜]\s*$'), '').trim();
 
     if (name.isEmpty) continue;
@@ -987,7 +1061,7 @@ OrbatNode? parseUnitList(String text) {
   );
 
   final stack = <({int indent, OrbatNode node})>[
-    (indent: rootEntry.indent, node: root)
+    (indent: rootEntry.indent, node: root),
   ];
 
   for (final e in entries.skip(1)) {
@@ -1055,7 +1129,7 @@ int _indentWidth(String line) {
 ///     不能用全局名称索引——编制图里「指挥部」「行政基地核心」大量重名，
 ///     全局去重会把不同分支整个吞掉（实测 8 个司令部只剩 2 个）。
 OrbatNode mergeTileTrees(
-    List<({OrbatNode tree, ImageTile tile})> trees, {
+  List<({OrbatNode tree, ImageTile tile})> trees, {
   StructureHint? hint,
 }) {
   if (trees.isEmpty) {
@@ -1142,8 +1216,9 @@ OrbatNode mergeTileTrees(
       if ((noteBad && noteNewOk) || (sidcBad && sidcNewOk)) {
         final merged = OrbatNode(
           uniqueDesignation: dup.uniqueDesignation,
-          additionalInformation:
-              noteBad && noteNewOk ? node.additionalInformation : dup.additionalInformation,
+          additionalInformation: noteBad && noteNewOk
+              ? node.additionalInformation
+              : dup.additionalInformation,
           sidc: sidcBad && sidcNewOk ? node.sidc : dup.sidc,
           children: dup.children,
         );
@@ -1269,7 +1344,9 @@ bool _sameUnit(String a, String b) {
 ///   - 识别到的下属单位若骨架里没有，挂到对应父节点下；
 ///   - 完全没被吸收的识别结果，挂到根下并标注「未匹配骨架」，便于人工归类。
 OrbatNode _mergeWithSkeleton(
-    List<({OrbatNode tree, ImageTile tile})> trees, OrbatNode skeleton) {
+  List<({OrbatNode tree, ImageTile tile})> trees,
+  OrbatNode skeleton,
+) {
   // 1) 识别结果按名称建索引
   //    同名节点在不同块里可能一个只有名字、一个有完整下属，
   //    必须保留**子节点最多**的那份，否则会丢掉营下的连。
@@ -1312,14 +1389,18 @@ OrbatNode _mergeWithSkeleton(
     if (src != null) {
       for (final c in src.children) {
         final name = c.uniqueDesignation;
-        final inSkeleton = skel.children.any((s) =>
-            s.uniqueDesignation == name ||
-            s.uniqueDesignation.contains(name) ||
-            name.contains(s.uniqueDesignation));
-        final alreadyBuilt = children.any((b) =>
-            b.uniqueDesignation == name ||
-            b.uniqueDesignation.contains(name) ||
-            name.contains(b.uniqueDesignation));
+        final inSkeleton = skel.children.any(
+          (s) =>
+              s.uniqueDesignation == name ||
+              s.uniqueDesignation.contains(name) ||
+              name.contains(s.uniqueDesignation),
+        );
+        final alreadyBuilt = children.any(
+          (b) =>
+              b.uniqueDesignation == name ||
+              b.uniqueDesignation.contains(name) ||
+              name.contains(b.uniqueDesignation),
+        );
         if (inSkeleton || alreadyBuilt) continue;
 
         // 整棵并入，并把子树标记为已吸收，避免末了又被当漏网挂一遍
@@ -1369,10 +1450,12 @@ OrbatNode _mergeWithSkeleton(
     if (target != null) {
       consumed.add(n.uniqueDesignation);
       for (final c in n.children) {
-        final dup = target.children.any((x) =>
-            x.uniqueDesignation == c.uniqueDesignation ||
-            x.uniqueDesignation.contains(c.uniqueDesignation) ||
-            c.uniqueDesignation.contains(x.uniqueDesignation));
+        final dup = target.children.any(
+          (x) =>
+              x.uniqueDesignation == c.uniqueDesignation ||
+              x.uniqueDesignation.contains(c.uniqueDesignation) ||
+              c.uniqueDesignation.contains(x.uniqueDesignation),
+        );
         if (!dup) target.children.add(c);
       }
       return;
@@ -1386,19 +1469,22 @@ OrbatNode _mergeWithSkeleton(
       if (parent != null) {
         consumed.add(n.uniqueDesignation);
         final dup = parent.children.any(
-            (x) => x.uniqueDesignation == n.uniqueDesignation);
+          (x) => x.uniqueDesignation == n.uniqueDesignation,
+        );
         if (!dup) parent.children.add(n);
         return;
       }
     }
 
     consumed.add(n.uniqueDesignation);
-    root.children.add(OrbatNode(
-      uniqueDesignation: n.uniqueDesignation,
-      additionalInformation: '未匹配骨架',
-      sidc: n.sidc,
-      children: n.children,
-    ));
+    root.children.add(
+      OrbatNode(
+        uniqueDesignation: n.uniqueDesignation,
+        additionalInformation: '未匹配骨架',
+        sidc: n.sidc,
+        children: n.children,
+      ),
+    );
   }
 
   for (final e in trees) {
@@ -1467,15 +1553,14 @@ int _levelScore(String name) {
   // 「巴基斯坦陆军 / 美国海军 / 俄罗斯陆军」这类**国名+军种**是全军总称，
   // 是最高层级的总根。下面剔除军种词的规则会把「陆军」去掉变成光秃秃的国名
   // （得分 0），导致总根被误选成它下面的「第1军」。这里先识别并直接返回最高分。
-  if (RegExp(r'(斯坦|联邦|国|帝国|王国|苏维埃|人民)(海军|陆军|空军|武装部队)')
-          .hasMatch(name) ||
-      RegExp(r'^(美国|俄罗斯|苏联|中国|英国|法国|德国|日本|印度|巴基斯坦|伊朗)'
-              r'(海军|陆军|空军|武装部队)')
-          .hasMatch(name)) {
+  if (RegExp(r'(斯坦|联邦|国|帝国|王国|苏维埃|人民)(海军|陆军|空军|武装部队)').hasMatch(name) ||
+      RegExp(
+        r'^(美国|俄罗斯|苏联|中国|英国|法国|德国|日本|印度|巴基斯坦|伊朗)'
+        r'(海军|陆军|空军|武装部队)',
+      ).hasMatch(name)) {
     return 100;
   }
-  final n = name.replaceAll(
-      RegExp(r'海军|陆军|空军|火箭军|军种|军事|集团军群'), '');
+  final n = name.replaceAll(RegExp(r'海军|陆军|空军|火箭军|军种|军事|集团军群'), '');
 
   int score = 0;
   if (n.contains('方面军') || n.contains('战区') || n.contains('军区')) {
@@ -1548,14 +1633,53 @@ String _guessSidcForName(String name) {
     echelon = '14';
   }
   // 1303 + 符号集10 + 00 + 梯队 + 实体110000 + 类型00 + 机动00 + 扇区00 + 保留8
-  return '13031000$echelon' '110000' '000000' '00000000';
+  return '13031000$echelon'
+      '110000'
+      '000000'
+      '00000000';
 }
 
-/// 从 JSON 字符串还原树（供手工编辑后重新出图）
+/// 从 JSON 字符串还原树（供手工编辑后重新出图）。
+/// 外部/AI 输入有字节、节点数和深度上限，避免超大或深层 JSON 耗尽资源。
 OrbatNode? parseTreeJson(String jsonText) {
+  const maxJsonChars = 10 * 1024 * 1024;
+  const maxNodes = 50000;
+  const maxDepth = 128;
+  if (jsonText.length > maxJsonChars) return null;
+
   try {
-    final map = jsonDecode(jsonText) as Map<String, dynamic>;
-    final tree = OrbatNode.fromJson(map);
+    final decoded = jsonDecode(jsonText);
+    if (decoded is! Map<String, dynamic>) return null;
+
+    final pendingNodes = <Map<String, dynamic>>[decoded];
+    final pendingDepths = <int>[1];
+    var nodeCount = 0;
+    while (pendingNodes.isNotEmpty) {
+      final node = pendingNodes.removeLast();
+      final depth = pendingDepths.removeLast();
+      if (depth > maxDepth || ++nodeCount > maxNodes) return null;
+
+      final options = node['options'];
+      if (options is! Map ||
+          options['uniqueDesignation'] is! String ||
+          (options['uniqueDesignation'] as String).trim().isEmpty ||
+          options['sidc'] is! String ||
+          (options['sidc'] as String).trim().isEmpty) {
+        return null;
+      }
+      final rawChildren = node.containsKey('subOrganizations')
+          ? node['subOrganizations']
+          : const <dynamic>[];
+      if (rawChildren is! List) return null;
+      for (final child in rawChildren) {
+        if (child is! Map) return null;
+        if (nodeCount + pendingNodes.length + 1 > maxNodes) return null;
+        pendingNodes.add(Map<String, dynamic>.from(child));
+        pendingDepths.add(depth + 1);
+      }
+    }
+
+    final tree = OrbatNode.fromJson(decoded);
     return tree.count > 0 ? tree : null;
   } catch (_) {
     return null;

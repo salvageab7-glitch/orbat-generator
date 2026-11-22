@@ -1,161 +1,101 @@
-# ORBAT CLI — 外部 Agent 调用说明（v0.2 · 独立 exe 版）
+# ORBAT CLI — 外部 Agent 调用说明（v0.3.6）
 
-## 位置与两种入口
+`orbat-cli.exe` 是编制生成器的命令行入口，适合外部 Agent、批处理和自动化脚本调用。Windows 安装包已内置该 exe；源码构建方式见根 README。
+
+## 位置
 
 ```
-编制生成器v0.2\
-├── orbat-cli.exe   ← 【推荐】独立 exe，不需要 Dart SDK
-├── orbat.bat       ← 备用：走 dart run，需本机装 Dart（开发/调试用）
-├── cli\            ← orbat.bat 用的 Dart 源码
+编制生成器v0.3.6\
+├── orbat-cli.exe   ← 独立 exe，不需要 Dart SDK
 ├── runtime\        ← 渲染脚本（render_orbat.js + cdp.js），出图必需
 └── data\           ← GUI 资源
 ```
 
-**给外部 Agent 用 `orbat-cli.exe`**。它是 AOT 编译的原生程序（约 9MB），
-启动快、不弹窗、不依赖 Dart SDK。二者命令完全相同。
+## 前置条件
 
-## 模式三（外部 Agent）
-
-如果你是这个软件的"外部 Agent"（用自己的模型读图），先读这两份之一：
-
-- 中文模型（DeepSeek / Kimi / 豆包 / Qwen-VL）：`docs/MODE3-AGENT-QUICKSTART.zh.md`
-- English-speaking models (GPT / Claude / Gemini): `docs/MODE3-AGENT-QUICKSTART.en.md`
-
-它们覆盖：提示词获取、大图切块参数、JSON 契约、SIDC 速查、校验与修复回路、交付清单。
-一句话版本：`prompts --type tile` 取规则 → 你写 JSON → `validate` → `render`；**不要用 `generate`**（那是模式一/二）。
-
-## 前置条件（重要：分发给别人时）
-
-`orbat-cli.exe` 本身不依赖 Dart，但**出图**（`render` / `batch` / `generate --render`）依赖外部环境：
-
-| 依赖 | 哪些命令需要 | 普通 Windows 用户是否自带 |
+| 依赖 | 哪些命令需要 | 说明 |
 |---|---|---|
-| `runtime\` 目录随 exe 同放 | render / batch / generate | 需随包分发（已在交付目录里） |
-| Node.js ≥ 24 | render / batch | ❌ 通常没有，需安装 |
-| Chrome 或 Edge 浏览器 | render / batch | ✅ 一般有 Edge |
-| 网络（api.deepseek.com） | generate / batch | ✅ 一般有 |
-| 网络（spatialillusions.com） | render / batch | ✅ 一般有 |
-| API Key | generate / batch | ❌ 需申请，见下 |
+| `runtime\` 与 exe 同目录 | render / batch / generate | 安装包已带 |
+| Node.js ≥ 24 | render / batch | 完整版内置；精简版需自装 |
+| Chrome 或 Edge | render / batch | Windows 一般有 Edge |
+| 网络（api.deepseek.com） | generate / batch | 模式一/二需要 |
+| 网络（spatialillusions.com） | render / batch | 出图需要 |
+| DeepSeek API Key | generate / batch | 模式三不需要 |
 
-只用 `parse` / `validate` / `normalize` / `usage` / `config` / `retry-tile` 这些
-**本地命令时，不需要 Node.js、浏览器和网络**，纯粹离线可用。
-
-## API Key 的配置（两种方式）
-
-**方式一：环境变量（推荐给 Agent / 分发场景）**
-
-```bash
-set DEEPSEEK_API_KEY=sk-你的key
-orbat-cli.exe generate --image 图.png --out 编制.json
-```
-
-环境变量优先级高于配置文件，且无需在本机写文件（适合共享机器）。
-
-**方式二：配置文件**
-
-`%APPDATA%\OrbatGenerator\config.json` 里填 `apiKey` 字段（GUI 设置里填）。
-两种入口共用同一份配置。
+本地命令 `parse` / `validate` / `normalize` / `audit` / `edit` / `usage` / `config` / `retry-tile` 不需要 Node、浏览器或网络。
 
 ## 调用约定
 
-- **stdout**：只有一个 JSON 对象，可直接 `json.loads`
-- **stderr**：诊断、进度、日志，不污染解析
-- **exit code**：`0` 成功 / `1` 执行失败 / `2` 参数错误 / `3` 校验或自检发现问题
+- **stdout**：只有一个 JSON 对象，可直接解析。
+- **stderr**：诊断、进度、日志，不污染 stdout。
+- **退出码**：`0` 成功；`1` 执行失败；`2` 参数错误；`3` 校验/自检/批量发现问题（`audit --strict` 也算）。
 
-返回信封：
+成功信封：
 
 ```json
-{"ok": true, "command": "命令名", "data": { ... }}
-{"ok": false, "command": "命令名", "error": "错误信息"}
+{"ok": true, "command": "validate", "data": {"nodeCount": 44, "redCount": 0, "warnCount": 0, "issues": []}}
+```
+
+失败信封：
+
+```json
+{"ok": false, "command": "render", "error": "渲染失败：..."}
+```
+
+## 输入优先级
+
+`parse` / `validate` / `normalize` / `audit` / `edit`：
+
+1. `--in <文件>`
+2. 位置文件参数
+3. stdin
+
+`render` / `generate` 还支持 `--image`、`--text`。`--in` 读取时会自动去掉 UTF-8 BOM。
+
+## 常用命令
+
+```bash
+# 版本
+orbat-cli.exe --version
+
+# 校验（红牌 exit 3）
+orbat-cli.exe validate --in 编制.json
+
+# 归一化；顺带修正 HQ 梯队码并返回修正数量
+orbat-cli.exe normalize --in 编制.json --adapt-for-render
+
+# 出图
+orbat-cli.exe render --in 编制.json --out 编制图
+
+# 就地改名（stdin 输入，无 --out 时把结果 JSON 输出到 stdout）
+type 编制.json | orbat-cli.exe edit --path "师部及师部营" --note "师部" --out 编制.json
+
+# 审计；strict 模式下红牌 exit 3
+orbat-cli.exe audit --strict --in 编制.json
 ```
 
 ## 命令一览
 
-| 命令 | 用途 | 输入 |
-|---|---|---|
-| `parse` | 解析编制 JSON，返回节点数/层级/根名 | 文件或 stdin |
-| `validate` | 校验，返回所有问题（红牌 exit=3） | 文件或 stdin |
-| `normalize` | 归一化为渲染器 7 键结构 | 文件或 stdin |
-| `render` | 出图（PNG+SVG） | JSON/图片/文本 |
-| `generate` | AI 识图 / 文字生成编制 | 图片或 `--text` |
-| `batch` | 批量识图+出图整个目录 | `--dir` 目录 |
-| `retry-tile` | 单独重跑识别失败的图块 | 图片+网格坐标 |
-| `selfcheck` | 环境自检（8 项） | 无 |
-| `usage` | API 调用次数/token 统计 | 无 |
-| `config` | 查看当前配置（key 只显示指纹） | 无 |
+| 命令 | 用途 |
+|---|---|
+| `parse` | 解析 JSON，返回节点数、层级、根名 |
+| `validate` | 规则校验，返回红牌/警告清单 |
+| `audit` | SIDC 与名称一致性审计；默认只读建议，`--strict` 红牌 exit 3 |
+| `edit` | 按 `--path` 修改名称/注释/SIDC |
+| `normalize` | 归一化为渲染器 7 键结构 |
+| `render` | 出 PNG + SVG |
+| `generate` | AI 识图/文字生成编制（需要 API Key） |
+| `batch` | 批量识图 + 校验 + 出图 |
+| `retry-tile` | 对单块重试识图 |
+| `selfcheck` | 环境/引擎自检；`--smoke` 真渲染 |
+| `usage` | 调用统计 |
+| `config` | 查看版本、模型、配置路径 |
+| `tutorial` | 导出内置教程 |
+| `prompts` | 导出识图提示词 |
 
-## 常用示例
+完整选项见 `orbat-cli.exe --help`，协议字段见仓库 `dsh-orbat-plugin/CLI-PROTOCOL.md`。
 
-```bash
-# 解析（文件参数）
-orbat-cli.exe parse 编制.json
+## 其他入口
 
-# 校验（stdin 管道，Agent 常用）
-cat 编制.json | orbat-cli.exe validate
-
-# 识图生成
-set DEEPSEEK_API_KEY=sk-xxx
-orbat-cli.exe generate --image 图.png --out 编制.json
-
-# 出图（透明底）
-orbat-cli.exe render --in 编制.json --out 成品名 --no-white-bg
-
-# 批量（整个目录）
-orbat-cli.exe batch --dir 图片目录 --out-dir 输出目录 --recursive
-
-# 重跑某个失败图块
-orbat-cli.exe retry-tile --image 图.png --row 0 --col 1 --rows 1 --cols 4 --out 块.json
-
-# 导出工作流提示词（模式三 Agent 用）
-orbat-cli.exe prompts --type tile --out 提示词.txt
-
-# 出图省略 --out → 自动用输入文件所在目录，返回值里宣告 outputDir
-orbat-cli.exe render --in 编制.json
-
-# 自检
-orbat-cli.exe selfcheck
-```
-
-> **审计与编辑（0.3.4 起）**：
-> `orbat-cli audit --in 编制.json` 输出「模型码与名称不一致」的清单和建议值（只读，不改文件）；
-> `orbat-cli edit --in 编制.json --path "根/第1旅/第2营" --name "新名" --note "驻地" --out 新.json`
-> 按路径改单个单位，也支持 `--patches 补丁.json` 批量改；省略 `--out` 时直接覆盖输入文件。
->
-> **语言开关（0.3.3 起）**：`generate` 默认输出中文名称/注释；加 `--raw-names` 保留原文称号/番号。
-> **自检冒烟（0.3.3 起）**：`selfcheck --smoke` 会真渲染一张 3 节点小图（约 15-25 秒），
-> 用来确认"站点 + 浏览器 + Node"整条出图链路真的通，而不只是"域名能连"。
->
-> **产物落盘规则（0.3.2 起）**：有输入文件时，产物与输入同目录（Agent 最容易定位）；
-> 没有输入上下文时（如只给 stdin），兜底目录为 `orbat-cli.exe 所在目录\输出文件存档\`，
-> 该目录不存在会自动创建。返回值里的 `outputDir` 字段始终是绝对路径，直接用它即可。
-
-## 选项参考
-
-| 选项 | 适用命令 | 说明 |
-|---|---|---|
-| `--in <文件>` | render | 输入 JSON |
-| `--image <文件>` | generate / retry-tile | 输入图片 |
-| `--text <内容或文件>` | generate | 纯文本输入 |
-| `--out <路径>` | generate / retry-tile | 输出 JSON |
-| `--out-dir <目录>` | batch | 批量输出目录（自动创建） |
-| `--dir <目录>` | batch | 输入图片目录 |
-| `--recursive` | batch | 递归子目录 |
-| `--no-white-bg` | render / batch | 透明底 PNG |
-| `--row/--col/--rows/--cols` | retry-tile | 失败块网格坐标 |
-| `--command-levels 2\|3` | normalize | 渲染层级（默认 3） |
-
-## 重新编译独立 exe（开发者）
-
-当 `app/lib/` 下的 CLI 相关源码改动后，重建 exe：
-
-```bash
-cd app
-bash scripts/build_cli.sh            # 默认输出到 编制生成器v0.2/orbat-cli.exe
-bash scripts/build_cli.sh <自定义路径>
-```
-
-脚本会：同步 `lib/` → `cli_aot/`（纯 Dart 子项目）→ AOT 编译 → 冒烟验证。
-
-**关键坑**：Dart AOT 编译会在 TEMP 下生成 `program.dill`，本机安全软件会删除系统 TEMP
-里的 `.dill`，且 Dart 对中文路径敏感。脚本把 TEMP 重定向到纯 ASCII 路径
-（可用 `ORBAT_BUILD_TMP` 环境变量覆盖）。这是编译能成功的唯一条件。
+- 模式三（外部 Agent 识图）快速开始：`docs/MODE3-AGENT-QUICKSTART.zh.md`
+- DSH Desktop 插件：`dsh-orbat-plugin/README.md`

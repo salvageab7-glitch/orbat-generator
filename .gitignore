@@ -22,3 +22,13 @@ browser-*.log
 .idea/
 .vscode/
 *.iml
+
+# DSH plugin build artifacts and local backups
+dsh-orbat-plugin/dist/
+dsh-orbat-plugin/orbat-logs/
+dsh-orbat-plugin/orbat-snapshots/
+dsh-orbat-plugin/输出文件存档/
+dsh-orbat-plugin/*.tgz
+dsh-orbat-plugin/orbat-cli.exe.prev
+dsh-orbat-plugin/orbat-cli.exe.bak
+dsh-orbat-plugin/orbat-cli.exe.beta7

@@ -15,7 +15,6 @@ if (Number(process.versions.node.split(".")[0]) < 24) {
   process.exit(2);
 }
 
-const PORT = Number(process.env.RENDER_PORT || 9415);
 const inputJson = path.resolve(process.argv[2]);
 const base = path.resolve(process.argv[3]);
 const SCALE = Number(process.env.SCALE || 2);
@@ -42,16 +41,80 @@ async function rmTempProfile(dir) {
   console.error("WARN: 临时 profile 没删掉（不影响出图）：" + dir);
 }
 
+let activeChrome = null;
+let activeCdp = null;
+let activeProfile = null;
+let cleanupPromise = null;
+let shutdownRequested = false;
+
+async function cleanup() {
+  if (cleanupPromise) return cleanupPromise;
+  cleanupPromise = (async () => {
+    if (activeCdp) {
+      try { activeCdp.close(); } catch (_) {}
+      activeCdp = null;
+    }
+    const chrome = activeChrome;
+    const child = chrome?.process;
+    if (child && child.exitCode === null && child.signalCode === null) {
+      // Use the browser-level CDP command first; killing only the browser parent on
+      // Windows can leave renderer subprocesses alive and keep profile files locked.
+      if (chrome.browserWebSocketUrl) {
+        const browserCdp = new (require("./cdp").CDP)(chrome.browserWebSocketUrl);
+        try {
+          await browserCdp.open();
+          await browserCdp.send("Browser.close", {}, 3000);
+        } catch (_) {
+        } finally {
+          browserCdp.close();
+        }
+      }
+      if (child.exitCode === null && child.signalCode === null) {
+        await new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            try { child.kill("SIGKILL"); } catch (_) {}
+            resolve();
+          }, 5000);
+          child.once("exit", () => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+      }
+    }
+    activeChrome = null;
+    if (activeProfile) {
+      await rmTempProfile(activeProfile);
+      activeProfile = null;
+    }
+  })();
+  return cleanupPromise;
+}
+
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (data) => {
+  if (!data.includes("ORBAT_SHUTDOWN")) return;
+  shutdownRequested = true;
+  cleanup().finally(() => process.exit(0));
+});
+// Keep a shutdown command available while rendering, but don't keep an otherwise
+// completed Node process alive solely because Dart still owns the stdin pipe.
+if (typeof process.stdin.unref === "function") process.stdin.unref();
+
 async function main() {
-  // 优先用调用方指定的可写目录（Dart 侧已探测过权限）；否则退回系统临时目录
+  // 优先用调用方指定的可写目录（Dart 侧已探测过权限）；否则退回系统临时目录。
   const WORK_DIR = process.env.ORBAT_WORK_DIR || os.tmpdir();
-  const userData = path.join(WORK_DIR, "orbat-render-" + Date.now());
+  fs.mkdirSync(WORK_DIR, { recursive: true });
+  activeProfile = fs.mkdtempSync(path.join(WORK_DIR, "orbat-render-"));
   console.log("[stage] 启动浏览器");
-  const chrome = await launch(PORT, userData, []);
-  let cdp;
+  activeChrome = await launch(activeProfile, [], (process) => {
+    // Track the process before CDP startup completes so a timeout can stop it too.
+    activeChrome = { process };
+  });
   try {
     console.log("[stage] 连接调试通道");
-    cdp = await connect(PORT);
+    activeCdp = await connect(activeChrome);
+    const cdp = activeCdp;
 
     // ---- 请求拦截 / polyfill：已于 2026-10-16 **整段删除，不留开关** ----
     // 这里曾有一段「字体请求 failRequest + Object.prototype.removeShadowUnits 补丁」，
@@ -202,10 +265,13 @@ async function main() {
 
     console.log("[stage] 完成");
   } finally {
-    if (cdp) cdp.close();
-    chrome.kill();
-    await rmTempProfile(userData);
+    await cleanup();
   }
 }
 
-main().catch((e) => { console.error("FAILED:", e.message); process.exit(1); });
+main().catch(async (e) => {
+  if (shutdownRequested) return;
+  console.error("FAILED:", e.message);
+  await cleanup();
+  process.exit(1);
+});

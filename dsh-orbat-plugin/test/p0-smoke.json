@@ -1,0 +1,26 @@
+{
+  "commandLevels": "1",
+  "options": {
+    "sidc": "130310002111000000000000000000",
+    "uniqueDesignation": "测试师",
+    "additionalInformation": ""
+  },
+  "subOrganizations": [
+    {
+      "options": {
+        "sidc": "130310001511000000000000000000",
+        "uniqueDesignation": "师部及师部营",
+        "additionalInformation": ""
+      },
+      "subOrganizations": []
+    },
+    {
+      "options": {
+        "sidc": "130310001612110000000000000000",
+        "uniqueDesignation": "第1营·第327步兵团",
+        "additionalInformation": ""
+      },
+      "subOrganizations": []
+    }
+  ]
+}

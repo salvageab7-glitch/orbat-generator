@@ -7,30 +7,93 @@ import 'sidc_tables.dart';
 /// 一个编制节点
 class OrbatNode {
   final String uniqueDesignation; // 显示名（中文）
-  final String additionalInformation; // 注释（≤24 汉字）
+  final String additionalInformation; // 注释（≤12 汉字 / 20 字母）
   final String sidc; // 30 位
   final List<OrbatNode> children;
+
+  /// 根节点的指挥层级设置（"1"~"4"；仅根节点有值，子节点恒为空串）
+  /// 规范：优先 "3"；出图过宽可 "2"；禁用 "1"/"4"（归一化时强制归 "3"）
+  final String commandLevels;
 
   OrbatNode({
     required this.uniqueDesignation,
     required this.additionalInformation,
     required this.sidc,
     List<OrbatNode>? children,
+    this.commandLevels = '',
   }) : children = children ?? <OrbatNode>[];
 
-  /// 从渲染器/AI 产出的 JSON 解析
+  /// 从渲染器/AI 产出的 JSON 解析；结构错误时拒绝静默生成空节点。
+  /// 在递归构造前迭代验证深度/节点数，避免直接 AI 响应绕过 pipeline 限额。
   factory OrbatNode.fromJson(Map<String, dynamic> json) {
-    final opts = (json['options'] is Map) ? json['options'] as Map : const {};
-    final subs = (json['subOrganizations'] is List)
+    _validateJsonTree(json);
+    return _fromValidatedJson(json);
+  }
+
+  static void _validateJsonTree(Map<String, dynamic> root) {
+    const maxNodes = 50000;
+    const maxDepth = 128;
+    final nodes = <Map<String, dynamic>>[root];
+    final depths = <int>[1];
+    var count = 0;
+    while (nodes.isNotEmpty) {
+      final node = nodes.removeLast();
+      final depth = depths.removeLast();
+      if (depth > maxDepth || ++count > maxNodes) {
+        throw const FormatException('ORBAT tree exceeds size limits');
+      }
+      final options = node['options'];
+      if (options is! Map ||
+          options['uniqueDesignation'] is! String ||
+          (options['uniqueDesignation'] as String).trim().isEmpty ||
+          options['sidc'] is! String ||
+          (options['sidc'] as String).trim().isEmpty) {
+        throw const FormatException(
+          'ORBAT node requires options.uniqueDesignation and options.sidc',
+        );
+      }
+      final note = options['additionalInformation'];
+      if (note != null && note is! String) {
+        throw const FormatException(
+          'ORBAT node options.additionalInformation must be a string',
+        );
+      }
+      final children = node.containsKey('subOrganizations')
+          ? node['subOrganizations']
+          : const <dynamic>[];
+      if (children is! List) {
+        throw const FormatException(
+          'ORBAT node subOrganizations must be a list',
+        );
+      }
+      for (final child in children) {
+        if (child is! Map) {
+          throw const FormatException('ORBAT child node must be an object');
+        }
+        if (count + nodes.length + 1 > maxNodes) {
+          throw const FormatException('ORBAT tree exceeds size limits');
+        }
+        nodes.add(Map<String, dynamic>.from(child));
+        depths.add(depth + 1);
+      }
+    }
+  }
+
+  static OrbatNode _fromValidatedJson(Map<String, dynamic> json) {
+    final options = json['options'] as Map;
+    final rawChildren = json.containsKey('subOrganizations')
         ? json['subOrganizations'] as List
-        : const [];
+        : const <dynamic>[];
     return OrbatNode(
-      uniqueDesignation: (opts['uniqueDesignation'] ?? '').toString(),
-      additionalInformation: (opts['additionalInformation'] ?? '').toString(),
-      sidc: (opts['sidc'] ?? '').toString(),
-      children: subs
-          .whereType<Map>()
-          .map((s) => OrbatNode.fromJson(Map<String, dynamic>.from(s)))
+      uniqueDesignation: options['uniqueDesignation'] as String,
+      additionalInformation: options['additionalInformation'] as String? ?? '',
+      sidc: options['sidc'] as String,
+      commandLevels: (json['commandLevels'] ?? '').toString(),
+      children: rawChildren
+          .map(
+            (child) =>
+                _fromValidatedJson(Map<String, dynamic>.from(child as Map)),
+          )
           .toList(),
     );
   }
@@ -58,8 +121,12 @@ class OrbatNode {
         'showMapLabels': true,
       },
       'subOrganizations': children
-          .map((c) => c.toNormalizedJson(
-              commandLevels: '', adaptForRender: adaptForRender))
+          .map(
+            (c) => c.toNormalizedJson(
+              commandLevels: '',
+              adaptForRender: adaptForRender,
+            ),
+          )
           .toList(),
       // commandLevels 只出现在根节点，由外层统一加
     };
@@ -107,10 +174,15 @@ class OrbatNode {
 /// 归一化后的完整树（带根 commandLevels）
 ///
 /// [adaptForRender] 默认 false（保真）。只有真正送给线上渲染器时才传 true。
-Map<String, dynamic> normalizeTree(OrbatNode root,
-    {required String commandLevels, bool adaptForRender = false}) {
+Map<String, dynamic> normalizeTree(
+  OrbatNode root, {
+  required String commandLevels,
+  bool adaptForRender = false,
+}) {
   final json = root.toNormalizedJson(
-      commandLevels: commandLevels, adaptForRender: adaptForRender);
+    commandLevels: commandLevels,
+    adaptForRender: adaptForRender,
+  );
   json['commandLevels'] = commandLevels;
   return json;
 }
@@ -135,25 +207,39 @@ class OrbatValidator {
 
     // 全局规则
     if (root.count > 80) {
-      issues.add(ValidationIssue('warn', '全局',
-          '节点总数 ${root.count} > 80，建议合并无编号重复单位'));
+      issues.add(
+        ValidationIssue('warn', '全局', '节点总数 ${root.count} > 80，建议合并无编号重复单位'),
+      );
     }
     final depth = root.maxDepth;
     if (depth > 3) {
-      issues.add(ValidationIssue('warn', '全局',
-          '最大层级 $depth > 3，第 3 层以下不应展开'));
+      issues.add(ValidationIssue('warn', '全局', '最大层级 $depth > 3，第 3 层以下不应展开'));
     }
 
-    return ValidationReport(issues: issues, nodeCount: root.count, depth: depth);
+    return ValidationReport(
+      issues: issues,
+      nodeCount: root.count,
+      depth: depth,
+    );
   }
 
-  static void _checkNode(OrbatNode node, String path, List<ValidationIssue> issues,
-      int depth,
-      {String? parentEchelon, String? parentName}) {
+  static void _checkNode(
+    OrbatNode node,
+    String path,
+    List<ValidationIssue> issues,
+    int depth, {
+    String? parentEchelon,
+    String? parentName,
+  }) {
     // SIDC 长度与格式
     if (node.sidc.length != 30) {
-      issues.add(ValidationIssue(
-          'red', path, 'SIDC 必须 30 位，当前 ${node.sidc.length} 位: ${node.sidc}'));
+      issues.add(
+        ValidationIssue(
+          'red',
+          path,
+          'SIDC 必须 30 位，当前 ${node.sidc.length} 位: ${node.sidc}',
+        ),
+      );
     } else if (!RegExp(r'^\d+$').hasMatch(node.sidc)) {
       issues.add(ValidationIssue('red', path, 'SIDC 含非数字字符'));
     } else {
@@ -168,8 +254,9 @@ class OrbatValidator {
       // 梯队码合法性（位 9-10，0-based 8-10）
       final echelon = node.sidc.substring(8, 10);
       if (!kEchelon.containsKey(echelon) && echelon != '00') {
-        issues.add(ValidationIssue(
-            'red', path, '梯队码 $echelon 非法（19/20 禁用，见码表）'));
+        issues.add(
+          ValidationIssue('red', path, '梯队码 $echelon 非法（19/20 禁用，见码表）'),
+        );
       }
       // 符号集（0-based 4-6）：10=陆地, 01=空中。主实体码语义随符号集变化。
       final symbolSet = node.sidc.substring(4, 6);
@@ -185,27 +272,42 @@ class OrbatValidator {
       if (entity != '000000') {
         if (table != null) {
           if (!table.containsKey(entity)) {
-            issues.add(ValidationIssue('warn', path,
-                '主实体码 $entity 不在符号集 $symbolSet 标准表中，请用 sidc.js meta 查证'));
+            issues.add(
+              ValidationIssue(
+                'warn',
+                path,
+                '主实体码 $entity 不在符号集 $symbolSet 标准表中，请用 sidc.js meta 查证',
+              ),
+            );
           }
         } else if (!kEntity.containsKey(entity)) {
-          issues.add(ValidationIssue(
-              'warn', path, '符号集 $symbolSet 未支持，主实体码 $entity 未核对'));
+          issues.add(
+            ValidationIssue(
+              'warn',
+              path,
+              '符号集 $symbolSet 未支持，主实体码 $entity 未核对',
+            ),
+          );
         }
       }
       // 110000 禁用 mod 98（类型修饰位 0-based 16-18）
       final typeMod = node.sidc.substring(16, 18);
       if (entity == '110000' && typeMod == '98') {
-        issues.add(ValidationIssue(
-            'red', path, '110000(HQ) 禁止加类型修饰 98，会导致整棵子树渲染消失'));
+        issues.add(
+          ValidationIssue('red', path, '110000(HQ) 禁止加类型修饰 98，会导致整棵子树渲染消失'),
+        );
       }
       // 修饰位全禁用（2026-11-19 用户明令）：主实体码后 14 位必须全 0。
       // 只报 warn 不拦截——历史 JSON（美军 BCT 等）含 0401/0601 修饰，仍可出图。
       final modifierTail = node.sidc.substring(16, 22); // 类型2+机动2+扇区2
       if (modifierTail != '000000') {
-        issues.add(ValidationIssue(
-            'warn', path,
-            '修饰位 $modifierTail 非零（类型/机动/扇区）。新规范：主实体码后14位全0，载具/口径细节写进名称'));
+        issues.add(
+          ValidationIssue(
+            'warn',
+            path,
+            '修饰位 $modifierTail 非零（类型/机动/扇区）。新规范：主实体码后14位全0，载具/口径细节写进名称',
+          ),
+        );
       }
 
       // ---- 结构自洽四查（v0.4 / A2）----
@@ -215,8 +317,13 @@ class OrbatValidator {
       final rank = _echelonRank[echelon];
       final parentRank = _echelonRank[parentEchelon];
       if (rank != null && parentRank != null && rank > parentRank) {
-        issues.add(ValidationIssue('red', path,
-            '层级倒挂：本级梯队 $echelon 高于上级「${parentName ?? "?"}」的 $parentEchelon'));
+        issues.add(
+          ValidationIssue(
+            'red',
+            path,
+            '层级倒挂：本级梯队 $echelon 高于上级「${parentName ?? "?"}」的 $parentEchelon',
+          ),
+        );
       }
 
       // ② 名称层级词与梯队码不一致（名字写"营"，码给"连"）
@@ -226,27 +333,42 @@ class OrbatValidator {
         // 这里只对"明显差两级以上"或非 HQ 情况报警，减少噪音
         final isHqNode = node.uniqueDesignation.endsWith('部');
         if (!isHqNode) {
-          issues.add(ValidationIssue('warn', path,
-              '名称层级词对应 $nameEch，但 SIDC 梯队段是 $echelon（「${node.uniqueDesignation}」）'));
+          issues.add(
+            ValidationIssue(
+              'warn',
+              path,
+              '名称层级词对应 $nameEch，但 SIDC 梯队段是 $echelon（「${node.uniqueDesignation}」）',
+            ),
+          );
         }
       }
 
       // ③ 空中单位必须用符号集 01（直升机/无人机/各类固定翼）
       // 例外：陆军航空兵（120600）是地面建制，用符号集 10 是对的
       final looksAir = RegExp(
-              r'直升机|无人机|运输机|战斗机|攻击机|轰炸机|加油机|教练机|预警机|侦察机|飞行'
-              r'|helicopter|drone|\buav\b|aircraft|fighter|bomber|transport aircraft',
-              caseSensitive: false)
+        r'直升机|无人机|运输机|战斗机|攻击机|轰炸机|加油机|教练机|预警机|侦察机|飞行'
+        r'|helicopter|drone|\buav\b|aircraft|fighter|bomber|transport aircraft',
+        caseSensitive: false,
+      ).hasMatch(node.uniqueDesignation);
+      final isArmyAviation = RegExp(r'航空兵|陆航|陆军航空')
           .hasMatch(node.uniqueDesignation);
-      final isArmyAviation =
-          RegExp(r'航空兵|陆航|陆军航空').hasMatch(node.uniqueDesignation);
       if (looksAir && !isArmyAviation && symbolSet == '10') {
-        issues.add(ValidationIssue('red', path,
-            '「${node.uniqueDesignation}」是空中单位，符号集应为 01，当前是 10（会渲染成方块）'));
+        issues.add(
+          ValidationIssue(
+            'red',
+            path,
+            '「${node.uniqueDesignation}」是空中单位，符号集应为 01，当前是 10（会渲染成方块）',
+          ),
+        );
       }
       if (!looksAir && symbolSet == '01') {
-        issues.add(ValidationIssue('warn', path,
-            '符号集为 01（空中），但名称「${node.uniqueDesignation}」不像空中单位'));
+        issues.add(
+          ValidationIssue(
+            'warn',
+            path,
+            '符号集为 01（空中），但名称「${node.uniqueDesignation}」不像空中单位',
+          ),
+        );
       }
     }
 
@@ -257,8 +379,9 @@ class OrbatValidator {
     }
     // 空格+左括号 会让线上渲染器卡死
     if (RegExp(r'\s+\(').hasMatch(name)) {
-      issues.add(ValidationIssue(
-          'red', path, '名称含「空格+左括号」，会导致渲染器卡死；改为紧贴括号或用·分隔'));
+      issues.add(
+        ValidationIssue('red', path, '名称含「空格+左括号」，会导致渲染器卡死；改为紧贴括号或用·分隔'),
+      );
     }
     // 「×N」合并写法：营级及以上不应合并（这些单位各有番号/装备/驻地），
     // 连、排级同构单位合并是允许的，与渲染器的排布策略无关。
@@ -266,24 +389,39 @@ class OrbatValidator {
       final ech = node.sidc.length >= 10 ? node.sidc.substring(8, 10) : '';
       const battalionOrAbove = {'16', '17', '18', '21', '22', '23', '24', '25'};
       if (battalionOrAbove.contains(ech)) {
-        issues.add(ValidationIssue(
-            'warn', path, '「$name」是营级及以上单位却用了 ×N 合并，'
-                '这些单位各有番号/装备/驻地，应逐个展开'));
+        issues.add(
+          ValidationIssue(
+            'warn',
+            path,
+            '「$name」是营级及以上单位却用了 ×N 合并，'
+                '这些单位各有番号/装备/驻地，应逐个展开',
+          ),
+        );
       }
     }
     // 单个节点的直属子元素过多时，渲染器会折行，横向观感被拉宽
     if (node.children.length > 10) {
-      issues.add(ValidationIssue(
-          'warn', path, '「$name」有 ${node.children.length} 个直属下属，'
-              '超过 10 个渲染器会折行，建议确认是否需要分层'));
+      issues.add(
+        ValidationIssue(
+          'warn',
+          path,
+          '「$name」有 ${node.children.length} 个直属下属，'
+              '超过 10 个渲染器会折行，建议确认是否需要分层',
+        ),
+      );
     }
     // 注释长度（v0.4 新规：3 个中文词语 ≈ 12 汉字 / 20 字母）
     final note = node.additionalInformation;
     final usage = measureNote(note);
     if (!usage.ok) {
-      issues.add(ValidationIssue('red', path,
+      issues.add(
+        ValidationIssue(
+          'red',
+          path,
           '注释超长：${usage.cjk} 汉字（上限 $kNoteMaxCjk）/ '
-          '${usage.letters} 字母（上限 $kNoteMaxLetters）'));
+              '${usage.letters} 字母（上限 $kNoteMaxLetters）',
+        ),
+      );
     }
     // 指挥官姓名（粗检："师长XXX"这类）——软警告
     if (kCommanderPattern.hasMatch(note)) {
@@ -291,8 +429,7 @@ class OrbatValidator {
     }
     // 注释里塞了自检说明（质量备注不是数据）
     if (kSelfCheckNotePattern.hasMatch(note)) {
-      issues.add(ValidationIssue(
-          'warn', path, '注释含自检说明（应清空，质量备注不写进数据字段）'));
+      issues.add(ValidationIssue('warn', path, '注释含自检说明（应清空，质量备注不写进数据字段）'));
     }
 
     // 同父兄弟重名/前缀重复：提示词铁律第 8 条要求了，这里补上机器检查
@@ -301,8 +438,9 @@ class OrbatValidator {
       final n = c.uniqueDesignation.trim();
       if (n.isEmpty) continue;
       if (seen.contains(n)) {
-        issues.add(ValidationIssue(
-            'red', '$path/$n', '同一父节点下出现同名子节点「$n」，会画成两个重复单位'));
+        issues.add(
+          ValidationIssue('red', '$path/$n', '同一父节点下出现同名子节点「$n」，会画成两个重复单位'),
+        );
       } else {
         for (final prev in seen) {
           if (prev.length >= 4 &&
@@ -310,8 +448,13 @@ class OrbatValidator {
               !prev.endsWith('部') &&
               !n.endsWith('部') &&
               (prev.startsWith(n) || n.startsWith(prev))) {
-            issues.add(ValidationIssue('warn', '$path/$n',
-                '「$n」与兄弟「$prev」名称互为前缀，疑似同一单位被识别两次'));
+            issues.add(
+              ValidationIssue(
+                'warn',
+                '$path/$n',
+                '「$n」与兄弟「$prev」名称互为前缀，疑似同一单位被识别两次',
+              ),
+            );
             break;
           }
         }
@@ -319,11 +462,18 @@ class OrbatValidator {
       }
     }
 
-    final selfEchelon = node.sidc.length >= 10 ? node.sidc.substring(8, 10) : null;
+    final selfEchelon = node.sidc.length >= 10
+        ? node.sidc.substring(8, 10)
+        : null;
     for (var i = 0; i < node.children.length; i++) {
-      _checkNode(node.children[i], '$path/${node.children[i].uniqueDesignation}',
-          issues, depth + 1,
-          parentEchelon: selfEchelon, parentName: node.uniqueDesignation);
+      _checkNode(
+        node.children[i],
+        '$path/${node.children[i].uniqueDesignation}',
+        issues,
+        depth + 1,
+        parentEchelon: selfEchelon,
+        parentName: node.uniqueDesignation,
+      );
     }
   }
 
@@ -351,7 +501,11 @@ class ValidationReport {
   final int nodeCount;
   final int depth;
 
-  ValidationReport({required this.issues, required this.nodeCount, required this.depth});
+  ValidationReport({
+    required this.issues,
+    required this.nodeCount,
+    required this.depth,
+  });
 
   int get redCount => issues.where((i) => i.level == 'red').length;
   int get warnCount => issues.where((i) => i.level == 'warn').length;

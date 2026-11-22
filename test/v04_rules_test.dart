@@ -20,10 +20,13 @@ import 'package:orbat_core/core/schema_rules.dart';
 import 'package:orbat_core/core/sidc_audit.dart';
 import 'package:orbat_core/core/sidc_rule.dart';
 import 'package:orbat_core/pipeline.dart';
+import 'package:orbat_core/render/renderer.dart';
 
 /// 造一个节点
 OrbatNode n(String name, String echelon,
-        {String sidc = '', String note = '', List<OrbatNode> kids = const []}) =>
+        {String sidc = '',
+        String note = '',
+        List<OrbatNode> kids = const []}) =>
     OrbatNode(
       uniqueDesignation: name,
       additionalInformation: note,
@@ -70,8 +73,10 @@ void main() {
     });
 
     test('兄弟名称互为前缀 → 软警告', () {
-      final tree = n('第1旅', '18',
-          kids: [n('Sydney University Regiment', '17'), n('Sydney University', '17')]);
+      final tree = n('第1旅', '18', kids: [
+        n('Sydney University Regiment', '17'),
+        n('Sydney University', '17')
+      ]);
       final r = OrbatValidator.validate(tree);
       expect(r.issues.any((i) => i.message.contains('互为前缀')), isTrue);
     });
@@ -84,25 +89,31 @@ void main() {
 
     test('空中单位用陆地符号集 → 红牌；陆军航空兵豁免', () {
       final heli = n('第3直升机营', '16');
-      expect(OrbatValidator.validate(heli)
-          .issues
-          .any((i) => i.message.contains('空中单位')), isTrue);
+      expect(
+          OrbatValidator.validate(heli)
+              .issues
+              .any((i) => i.message.contains('空中单位')),
+          isTrue);
 
       final armyAviation = OrbatNode(
         uniqueDesignation: '陆军航空兵营',
         additionalInformation: '',
         sidc: '130310001612060000000000000000',
       );
-      expect(OrbatValidator.validate(armyAviation)
-          .issues
-          .any((i) => i.message.contains('空中单位')), isFalse);
+      expect(
+          OrbatValidator.validate(armyAviation)
+              .issues
+              .any((i) => i.message.contains('空中单位')),
+          isFalse);
     });
 
     test('注释超长 → 红牌', () {
       final tree = n('第1连', '15', note: '一二三四五六七八九十一二三四');
-      expect(OrbatValidator.validate(tree)
-          .issues
-          .any((i) => i.message.contains('注释超长')), isTrue);
+      expect(
+          OrbatValidator.validate(tree)
+              .issues
+              .any((i) => i.message.contains('注释超长')),
+          isTrue);
     });
   });
 
@@ -132,7 +143,6 @@ void main() {
       expect(fixed.sidc.substring(10, 16), '110200');
       expect(fixed.sidc.length, 30);
     });
-
 
     test('母体名开头带层级词、单位本身是连级 → 不按名称改（尾部无层级词）', () {
       // "2nd Division Postal Unit" 开头是母体名 Division，若照它改成师级会把对的结果改错
@@ -175,6 +185,56 @@ void main() {
       expect(SidcRule.fromName('Artillery Regiment').entity, '130300');
       expect(SidcRule.fromName('Engineer Company').entity, '140700');
       expect(SidcRule.fromName('Infantry Battalion').entity, '121100');
+    });
+  });
+
+  group('A8 渲染前梯队兜底', () {
+    test('· 前段优先，合成 HQ 按实兵梯队取码', () {
+      expect(SidcRule.guessEchelon('第1营·第327步兵团'), '16');
+      expect(SidcRule.guessEchelon('第101空降师·师部'), '21');
+      expect(SidcRule.guessEchelon('师部及师部营'), '16');
+    });
+
+    test('fixEchelon 只改梯队位，源树保持不变', () {
+      final src = OrbatNode(
+        uniqueDesignation: '师部及师部营',
+        additionalInformation: '',
+        sidc: '130310001512340000000000000000',
+        commandLevels: '1',
+      );
+      final report = OrbatAutoFix.fixEchelonReport(src);
+      expect(report.fixed, 1);
+      expect(report.tree.sidc, '130310001612340000000000000000');
+      expect(report.tree.commandLevels, '1');
+      expect(src.sidc, '130310001512340000000000000000');
+      expect(
+        OrbatAutoFix.fixEchelon(src).sidc,
+        '130310001612340000000000000000',
+      );
+    });
+
+    test('渲染副本归一化后保留修正值', () {
+      final src = OrbatNode(
+        uniqueDesignation: '师部及师部营',
+        additionalInformation: '',
+        sidc: '130310001511000000000000000000',
+      );
+      final renderJson = normalizeTreeJson(
+        OrbatAutoFix.fixEchelon(src),
+        commandLevels: '1',
+        adaptForRender: true,
+      );
+      expect(renderJson, contains('130310001611000000000000000000'));
+    });
+  });
+
+  group('A9 渲染提示', () {
+    test('notices 默认空，withNotice 只追加副本', () {
+      final base = RenderResult(ok: true, elapsed: Duration.zero);
+      expect(base.notices, isEmpty);
+      final withOne = base.withNotice('渲染前修正 1 处梯队码');
+      expect(withOne.notices, ['渲染前修正 1 处梯队码']);
+      expect(base.notices, isEmpty);
     });
   });
 
@@ -235,7 +295,9 @@ void main() {
     test('同一单位挂在两个父节点下 → 合并为一份', () {
       final root = n('第1师', '21', kids: [
         n('第1旅', '18', kids: [n('第3营', '16')]),
-        n('师直属队', '15', kids: [n('第3营', '16', kids: [n('第1连', '15')])]),
+        n('师直属队', '15', kids: [
+          n('第3营', '16', kids: [n('第1连', '15')])
+        ]),
       ]);
       final groups = scan(root);
       expect(groups.length, 1);
@@ -251,7 +313,8 @@ void main() {
 
   group('A0 基准集回归（本地链路，无 API）', () {
     test('模拟模型输出 → 修复 → 审计 → 校验，指标不低于阈值', () {
-      final raw = File('test/fixtures/aus2div_model_raw.txt').readAsStringSync();
+      final raw =
+          File('test/fixtures/aus2div_model_raw.txt').readAsStringSync();
       final expected = jsonDecode(
               File('test/fixtures/aus2div_expected.json').readAsStringSync())
           as Map<String, dynamic>;

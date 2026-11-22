@@ -1,8 +1,8 @@
-# 模式三 · 外部 Agent 快速上手（中文版）
+﻿# 模式三 · 外部 Agent 快速上手（中文版）
 
 > **适用模型**：DeepSeek-VL 系列、Kimi（moonshot 视觉型号）、豆包 Doubao-vision、Qwen-VL、GLM-4V 等**能直接看图**的中文模型。
 > **不适用**：纯文本模型（如不带视觉的 deepseek-chat）。遇到这种情况走 §0 的替代路径。
-> **对应版本**：orbat-cli v0.3.5。文档里的命令都在 `orbat-cli.exe` 所在目录执行。
+> **对应版本**：orbat-cli v0.3.6。文档里的命令都在 `orbat-cli.exe` 所在目录执行。
 
 ---
 

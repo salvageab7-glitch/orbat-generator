@@ -5,25 +5,33 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
-/// 插件交接模式（安卓端 Agent 外挂）：
-/// - orbat/storage 通道：
-///   · isManageStorageGranted / requestManageStorage：所有文件访问授权
-///   · consumePendingRun：Dart 就绪后取走「App 未就绪时收到的触发」
-/// - Agent 可用 intent 直接触发批处理，无需人工点界面：
-///   am start -a com.orbat.orbat_core.plugin.RUN
+/// Android native bridges:
+/// - orbat/storage: shared Download handoff and a pending plugin RUN intent.
+/// - orbat/secret: API-key encryption using an Android Keystore AES-GCM key.
+/// The exported RUN action is honored by Dart only after the user selected Agent mode.
 class MainActivity : FlutterActivity() {
-    private val channelName = "orbat/storage"
-    private var channel: MethodChannel? = null
+    private val storageChannelName = "orbat/storage"
+    private val secretChannelName = "orbat/secret"
+    private var storageChannel: MethodChannel? = null
     private var pendingPluginRun = false
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-        channel?.setMethodCallHandler { call, result ->
+
+        storageChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, storageChannelName)
+        storageChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
                 "isManageStorageGranted" -> {
                     result.success(
@@ -54,9 +62,30 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
-        // 冷启动自带触发 intent：Dart 尚未就绪，先记下，等 Dart 拉取。
-        // 检查后立即清掉 action——避免 Activity 记录里残留 RUN intent，
-        // 导致之后普通点图标冷启动也被误判为插件触发。
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, secretChannelName)
+            .setMethodCallHandler { call, result ->
+                try {
+                    when (call.method) {
+                        "seal" -> {
+                            val plain = call.argument<String>("plain")
+                                ?: throw IllegalArgumentException("Missing plaintext")
+                            result.success(encryptSecret(plain))
+                        }
+                        "open" -> {
+                            val payload = call.argument<String>("payload")
+                                ?: throw IllegalArgumentException("Missing ciphertext")
+                            result.success(decryptSecret(payload))
+                        }
+                        else -> result.notImplemented()
+                    }
+                } catch (_: Exception) {
+                    // Do not include key material or ciphertext in platform errors/logs.
+                    result.error("SECRET_STORE", "Android Keystore operation failed", null)
+                }
+            }
+
+        // Cold-start RUN intents arrive before Dart registers its handler.
         if (intent?.action == PluginRunAction) {
             pendingPluginRun = true
             intent.action = Intent.ACTION_MAIN
@@ -65,14 +94,66 @@ class MainActivity : FlutterActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         if (intent.action == PluginRunAction) {
-            // 热触发：Dart 已就绪，直接通知；未就绪则挂起
-            channel?.invokeMethod("pluginRun", null)
+            storageChannel?.invokeMethod("pluginRun", null)
                 ?: run { pendingPluginRun = true }
         }
     }
 
+    private fun encryptSecret(plain: String): String {
+        require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            "Android Keystore AES-GCM requires API 23 or newer"
+        }
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateSecretKey())
+        val encrypted = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
+        val combined = cipher.iv + encrypted
+        return Base64.encodeToString(combined, Base64.NO_WRAP)
+    }
+
+    private fun decryptSecret(payload: String): String {
+        require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            "Android Keystore AES-GCM requires API 23 or newer"
+        }
+        val combined = Base64.decode(payload, Base64.DEFAULT)
+        require(combined.size > GCM_IV_BYTES + GCM_TAG_BYTES) { "Invalid ciphertext" }
+        val iv = combined.copyOfRange(0, GCM_IV_BYTES)
+        val encrypted = combined.copyOfRange(GCM_IV_BYTES, combined.size)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            getOrCreateSecretKey(),
+            GCMParameterSpec(GCM_TAG_BITS, iv)
+        )
+        return String(cipher.doFinal(encrypted), Charsets.UTF_8)
+    }
+
+    private fun getOrCreateSecretKey(): SecretKey {
+        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        val existing = keyStore.getKey(SECRET_KEY_ALIAS, null) as? SecretKey
+        if (existing != null) return existing
+
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                SECRET_KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setRandomizedEncryptionRequired(true)
+                .build()
+        )
+        return generator.generateKey()
+    }
+
     companion object {
         const val PluginRunAction = "com.orbat.orbat_core.plugin.RUN"
+        private const val ANDROID_KEYSTORE = "AndroidKeyStore"
+        private const val SECRET_KEY_ALIAS = "orbat_api_key_v1"
+        private const val GCM_IV_BYTES = 12
+        private const val GCM_TAG_BITS = 128
+        private const val GCM_TAG_BYTES = GCM_TAG_BITS / 8
     }
 }

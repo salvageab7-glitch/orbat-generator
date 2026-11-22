@@ -1,0 +1,43 @@
+{
+  "name": "@local/orbat-agent",
+  "version": "0.3.6",
+  "description": "Validate ORBAT JSON and render PNG/SVG files for an AI agent.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings-general",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/*.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "README.md",
+    "AGENT-GUIDE.md",
+    "CLI-PROTOCOL.md",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+    "icon.svg",
+    "orbat-cli.exe",
+    "runtime/*.js",
+    "runtime/package.json"
+  ]
+}

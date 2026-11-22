@@ -21,8 +21,7 @@ import '../render/renderer.dart';
 
 class PluginBridge {
   /// 公共 Download 根（安卓标准路径，所有安卓设备一致）
-  static const String downloadRoot =
-      '/storage/emulated/0/Download';
+  static const String downloadRoot = '/storage/emulated/0/Download';
 
   static String get inboxDir => '$downloadRoot/orbat_inbox';
   static String get outboxDir => '$downloadRoot/orbat_outbox';
@@ -32,15 +31,25 @@ class PluginBridge {
   static Directory get inbox => Directory(inboxDir);
   static Directory get outbox => Directory(outboxDir);
 
-  /// 扫描待处理 JSON（按文件名排序，处理顺序稳定）
-  static List<File> scanInbox() {
-    if (!inbox.existsSync()) return const [];
-    return inbox
-        .listSync()
-        .whereType<File>()
-        .where((f) => f.path.toLowerCase().endsWith('.json'))
-        .toList()
-      ..sort((a, b) => a.path.compareTo(b.path));
+  static const int maxInboxEntriesToInspect = 2000;
+  static const int maxFilesPerBatch = 100;
+  static const int maxJsonFileBytes = 10 * 1024 * 1024;
+
+  /// 有界异步扫描 inbox，避免公共目录中的海量条目占满内存。
+  /// 每批最多处理 100 个 JSON；剩余文件留待下一次触发。
+  static Future<List<File>> scanInbox() async {
+    if (!await inbox.exists()) return const [];
+    final files = <File>[];
+    var inspected = 0;
+    await for (final entry in inbox.list(followLinks: false)) {
+      if (++inspected > maxInboxEntriesToInspect) break;
+      if (entry is File && entry.path.toLowerCase().endsWith('.json')) {
+        files.add(entry);
+        if (files.length >= maxFilesPerBatch) break;
+      }
+    }
+    files.sort((a, b) => a.path.compareTo(b.path));
+    return files;
   }
 
   static void ensureDirs() {
@@ -55,12 +64,14 @@ class PluginBridge {
   static Future<Map<String, dynamic>> processOne(
     File jsonFile,
     Future<RenderResult> Function(String normalizedJson, String outputBase)
-        render,
+    render,
   ) async {
-    final base = jsonFile.path
-        .split(Platform.pathSeparator)
-        .last
-        .replaceAll(RegExp(r'\.json$', caseSensitive: false), '');
+    final sourceName = jsonFile.path.split(Platform.pathSeparator).last;
+    final rawBase = sourceName
+        .replaceAll(RegExp(r'\.json$', caseSensitive: false), '')
+        .replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1F]'), '_')
+        .trim();
+    final base = rawBase.isEmpty ? 'input' : rawBase;
     final report = <String, dynamic>{
       'file': base,
       'ok': false,
@@ -73,18 +84,39 @@ class PluginBridge {
 
     String raw;
     try {
-      raw = await jsonFile.readAsString();
+      final size = await jsonFile.length();
+      if (size > maxJsonFileBytes) {
+        report['error'] =
+            'JSON 文件超过大小上限（${maxJsonFileBytes ~/ (1024 * 1024)} MiB）';
+        await _writeReport(base, report);
+        await _archiveSource(jsonFile);
+        return report;
+      }
+      final bytes = <int>[];
+      await for (final chunk in jsonFile.openRead(0, maxJsonFileBytes + 1)) {
+        bytes.addAll(chunk);
+      }
+      if (bytes.length > maxJsonFileBytes) {
+        report['error'] =
+            'JSON 文件超过大小上限（${maxJsonFileBytes ~/ (1024 * 1024)} MiB）';
+        await _writeReport(base, report);
+        await _archiveSource(jsonFile);
+        return report;
+      }
+      raw = utf8.decode(bytes);
     } catch (e) {
       report['error'] = '读取失败：$e';
       await _writeReport(base, report);
+      await _archiveSource(jsonFile);
       return report;
     }
 
     // 解析 + 归一化
     final tree = parseTreeJson(raw);
     if (tree == null) {
-      report['error'] = 'JSON 解析失败：不是合法的编制树（缺 name/sidc/children 结构）';
+      report['error'] = 'JSON 解析失败：不是合法或超出限制的编制树';
       await _writeReport(base, report);
+      await _archiveSource(jsonFile);
       return report;
     }
     final normalized = normalizeTreeJson(tree, adaptForRender: true);
@@ -118,15 +150,35 @@ class PluginBridge {
     }
 
     await _writeReport(base, report);
-    // 源文件移入 done/（避免重复处理）
-    try {
-      await jsonFile.rename('$doneDir/${jsonFile.path.split(Platform.pathSeparator).last}');
-    } catch (_) {}
+    await _archiveSource(jsonFile);
     return report;
   }
 
+  /// 将成功、无效或不可读的输入移出 inbox；同名文件不互相覆盖。
+  static Future<void> _archiveSource(File source) async {
+    try {
+      final directory = Directory(doneDir);
+      await directory.create(recursive: true);
+      final name = source.path.split(Platform.pathSeparator).last;
+      var destination = File('${directory.path}/$name');
+      if (await destination.exists()) {
+        final dot = name.lastIndexOf('.');
+        final stem = dot > 0 ? name.substring(0, dot) : name;
+        final extension = dot > 0 ? name.substring(dot) : '';
+        destination = File(
+          '${directory.path}/${stem}_${DateTime.now().microsecondsSinceEpoch}$extension',
+        );
+      }
+      await source.rename(destination.path);
+    } catch (_) {
+      // 若归档失败，保留源文件以便 Agent 修复或下一次重试。
+    }
+  }
+
   static Future<void> _writeReport(
-      String base, Map<String, dynamic> report) async {
+    String base,
+    Map<String, dynamic> report,
+  ) async {
     await File('$outboxDir/$base.report.json')
         .writeAsString(jsonEncode(report), flush: true);
   }

@@ -3,7 +3,7 @@
 /// 设计约束：
 ///   · stdout **只输出 JSON**，一行或一个 JSON 对象，机器可直接 json.loads
 ///   · 所有诊断/进度/日志走 stderr，绝不污染 stdout
-///   · 输入优先读 stdin（管道），也接受文件参数
+///   · 输入优先读文件参数，也接受 stdin；支持的 JSON 命令优先 --in
 ///   · 任何错误都返回结构化的 {"ok":false,"error":...} 且 exit code ≠ 0
 ///
 /// 用法见 `orbat.bat --help`
@@ -14,6 +14,7 @@ import 'dart:io';
 
 import '../core/app_paths.dart';
 import '../core/logger.dart';
+import '../core/version.dart';
 import '../core/auto_fix.dart';
 import '../i18n/l10n.dart';
 import '../i18n/tutorial_text.dart';
@@ -28,6 +29,9 @@ import '../ai/image_prep.dart';
 import '../ai/prompt.dart';
 import '../services/settings_store.dart';
 
+/// 机器可读的 CLI 协议版本；信封/字段语义变化时递增。
+const int kCliProtocolVersion = 1;
+
 void _out(Map<String, dynamic> obj) {
   stdout.writeln(jsonEncode(obj));
 }
@@ -36,7 +40,11 @@ void _err(String msg) {
   stderr.writeln('[orbat-cli] $msg');
 }
 
-Map<String, dynamic> _ok(String cmd, Map<String, dynamic> data) {
+Map<String, dynamic> _ok(
+  String cmd,
+  Map<String, dynamic> data, {
+  bool ok = true,
+}) {
   // 产物目录宣告：AI Agent 调用 CLI 后，必须能明确知道产物落在哪个文件夹。
   // 从 data 里的路径字段提取父目录；取不到则用输出目录配置/桌面。
   String? dir;
@@ -48,8 +56,8 @@ Map<String, dynamic> _ok(String cmd, Map<String, dynamic> data) {
     }
   }
   final d = data['outputDir'] ?? dir ?? _defaultCliOutputDir();
-  return {
-    'ok': true,
+  final result = <String, dynamic>{
+    'ok': ok,
     'command': cmd,
     'data': {
       ...data,
@@ -57,6 +65,11 @@ Map<String, dynamic> _ok(String cmd, Map<String, dynamic> data) {
       'outputDir': d,
     },
   };
+  // 顶层 ok=false 时补一个便于宿主直接读取的错误字段。
+  if (!ok && data['error'] is String && (data['error'] as String).isNotEmpty) {
+    result['error'] = data['error'];
+  }
+  return result;
 }
 
 /// CLI 兜底输出目录（命令自身已优先用输入目录）。
@@ -71,7 +84,11 @@ Map<String, dynamic> _fail(String cmd, String msg) => {
       'error': msg,
     };
 
-/// 读取输入：优先 stdin（有管道数据时），否则按路径读文件
+/// 去掉 UTF-8 BOM；Windows 记事本/PowerShell 管道偶尔会带。
+String _stripBom(String text) =>
+    text.startsWith('\uFEFF') ? text.substring(1) : text;
+
+/// 读取输入：优先文件参数（避免无管道时等待 stdin），否则读 stdin。
 Future<String?> _readInput(List<String> args) async {
   // 找到第一个非选项参数（注意：选项的值也是非选项参数，需排除）
   final positional = _positionalArgs(args);
@@ -79,7 +96,7 @@ Future<String?> _readInput(List<String> args) async {
   if (positional.isNotEmpty) {
     // 有文件参数 → 直接读文件，完全不碰 stdin（避免事件循环挂住）
     final f = File(positional.first);
-    if (f.existsSync()) return f.readAsStringSync();
+    if (f.existsSync()) return _stripBom(f.readAsStringSync());
     return null;
   }
 
@@ -97,7 +114,7 @@ Future<String?> _readInput(List<String> args) async {
           onTimeout: () => const <String>[],
         );
     if (chunks.isEmpty) return null;
-    return chunks.join('\n');
+    return _stripBom(chunks.join('\n'));
   } catch (_) {
     return null;
   }
@@ -107,6 +124,12 @@ Future<String?> _readInput(List<String> args) async {
 List<String> _positionalArgs(List<String> args) {
   const valueOptions = {
     'in', 'out', 'image', 'text', 'extra', 'command-levels',
+    // edit/audit 的定位与补丁参数（否则他们的值会被误当成位置文件）
+    'path', 'patches', 'name', 'note', 'sidc',
+    // batch / tutorial / prompts / retry-tile 的值参数
+    'dir', 'out-dir', 'lang', 'type', 'row', 'col', 'rows', 'cols',
+    // 允许 --white-bg false 这种写法
+    'white-bg',
   };
   final out = <String>[];
   for (var i = 0; i < args.length; i++) {
@@ -124,18 +147,23 @@ List<String> _positionalArgs(List<String> args) {
 }
 
 Future<void> _runMain(List<String> args) async {
-  // 把工作目录固定到脚本所在目录的上级（app/），避免相对路径找错
-  try {
-    final scriptDir = File(Platform.script.toFilePath()).parent;
-    final appDir = scriptDir.parent;
-    if (File('${appDir.path}${Platform.pathSeparator}pubspec.yaml').existsSync()) {
-      Directory.current = appDir.path;
-    }
-  } catch (_) {}
+  // 不改变 cwd：相对路径按调用方当前目录解析，符合常见 CLI 约定。
+  if (args.isNotEmpty && (args.first == '--version' || args.first == '-v')) {
+    _out({
+      'ok': true,
+      'command': 'version',
+      'data': {'version': kAppVersion, 'protocol': kCliProtocolVersion},
+    });
+    return;
+  }
 
   if (args.isEmpty || args.contains('--help') || args.contains('-h')) {
     _err(_help);
-    _out({'ok': true, 'command': 'help', 'data': {'usage': _help}});
+    _out({
+      'ok': true,
+      'command': 'help',
+      'data': {'usage': _help}
+    });
     return;
   }
 
@@ -151,10 +179,10 @@ Future<void> _runMain(List<String> args) async {
         await _cmdParse(rest);
         break;
       case 'audit':
-        await _cmdAudit(args);
+        await _cmdAudit(rest);
         break;
       case 'edit':
-        await _cmdEdit(args);
+        await _cmdEdit(rest);
         break;
       case 'validate':
         await _cmdValidate(rest);
@@ -178,7 +206,7 @@ Future<void> _runMain(List<String> args) async {
         await _cmdConfig(rest);
         break;
       case 'tutorial':
-        await _cmdTutorial(args);
+        await _cmdTutorial(rest);
         break;
       case 'prompts':
         await _cmdPrompts(rest);
@@ -204,7 +232,7 @@ Future<void> _runMain(List<String> args) async {
 // ---------- 命令实现 ----------
 
 Future<void> _cmdParse(List<String> args) async {
-  final text = await _readInput(args);
+  final text = await _readInputOrIn(args);
   if (text == null) {
     _out(_fail('parse', '没有输入：请传文件路径或通过 stdin 管道输入 JSON'));
     exitCode = 2;
@@ -214,10 +242,10 @@ Future<void> _cmdParse(List<String> args) async {
     final tree = parseTreeJson(text);
     if (tree == null) throw const FormatException('JSON 无法解析为编制树');
     _out(_ok('parse', {
-          'nodeCount': tree.count,
-          'maxDepth': tree.maxDepth,
-          'root': tree.uniqueDesignation,
-        }));
+      'nodeCount': tree.count,
+      'maxDepth': tree.maxDepth,
+      'root': tree.uniqueDesignation,
+    }));
   } catch (e) {
     _out(_fail('parse', '解析失败: $e'));
     exitCode = 1;
@@ -225,7 +253,7 @@ Future<void> _cmdParse(List<String> args) async {
 }
 
 Future<void> _cmdValidate(List<String> args) async {
-  final text = await _readInput(args);
+  final text = await _readInputOrIn(args);
   if (text == null) {
     _out(_fail('validate', '没有输入：请传文件路径或通过 stdin 管道输入 JSON'));
     exitCode = 2;
@@ -236,19 +264,19 @@ Future<void> _cmdValidate(List<String> args) async {
     if (tree == null) throw const FormatException('JSON 无法解析为编制树');
     final report = OrbatValidator.validate(tree);
     _out(_ok('validate', {
-          'nodeCount': report.nodeCount,
-          'depth': report.depth,
-          'redCount': report.redCount,
-          'warnCount': report.warnCount,
-          'ok': report.ok,
-          'issues': report.issues
-              .map((i) => {
-                    'level': i.level,
-                    'path': i.path,
-                    'message': i.message,
-                  })
-              .toList(),
-        }));
+      'nodeCount': report.nodeCount,
+      'depth': report.depth,
+      'redCount': report.redCount,
+      'warnCount': report.warnCount,
+      'ok': report.ok,
+      'issues': report.issues
+          .map((i) => {
+                'level': i.level,
+                'path': i.path,
+                'message': i.message,
+              })
+          .toList(),
+    }));
     if (!report.ok) exitCode = 3; // 红牌
   } catch (e) {
     _out(_fail('validate', '$e'));
@@ -262,13 +290,27 @@ Future<String?> _readInputWithIn(List<String> args) async {
   if (inPath != null && inPath.isNotEmpty) {
     final f = File(inPath);
     if (!f.existsSync()) throw FormatException('输入文件不存在: $inPath');
-    return await f.readAsString();
+    return _stripBom(await f.readAsString());
+  }
+  return _readInput(args);
+}
+
+/// parse/validate/normalize 用：支持 --in，但缺文件时返回 null 而不是抛异常，
+/// 保持这些命令原有的“没有输入 → exit 2”语义。
+Future<String?> _readInputOrIn(List<String> args) async {
+  final inPath = _option(args, 'in');
+  if (inPath != null && inPath.isNotEmpty) {
+    final f = File(inPath);
+    if (!f.existsSync()) return null;
+    return _stripBom(await f.readAsString());
   }
   return _readInput(args);
 }
 
 /// audit —— 一致性审计 + 结构校验 + 跨父同名扫描（只读，不改文件）
 Future<void> _cmdAudit(List<String> args) async {
+  final strict =
+      args.contains('--strict') || args.contains('--fail-on-red');
   final text = await _readInputWithIn(args);
   if (text == null) {
     _out(_fail('audit', '没有输入：请传文件路径或通过 stdin 管道输入 JSON'));
@@ -284,6 +326,8 @@ Future<void> _cmdAudit(List<String> args) async {
     _out(_ok('audit', {
       'nodeCount': tree.count,
       'depth': tree.maxDepth,
+      'strict': strict,
+      'passed': !strict || report.ok,
       'sidcMismatchCount': audit.length,
       'sidcMismatches': audit
           .map((a) => {
@@ -296,15 +340,15 @@ Future<void> _cmdAudit(List<String> args) async {
               })
           .toList(),
       'duplicateCount': dups.length,
-      'duplicates': dups
-          .map((d) => {'name': d.displayName, 'paths': d.paths})
-          .toList(),
+      'duplicates':
+          dups.map((d) => {'name': d.displayName, 'paths': d.paths}).toList(),
       'redCount': report.redCount,
       'warnCount': report.warnCount,
       'issues': report.issues
           .map((i) => {'level': i.level, 'path': i.path, 'message': i.message})
           .toList(),
     }));
+    if (strict && !report.ok) exitCode = 3;
   } catch (e) {
     _out(_fail('audit', '$e'));
     exitCode = 1;
@@ -346,7 +390,8 @@ Future<void> _cmdEdit(List<String> args) async {
       ));
     }
     if (patches.isEmpty) {
-      _out(_fail('edit', '没有可应用的修改：需要 --path（配 --name/--note/--sidc）或 --patches'));
+      _out(_fail(
+          'edit', '没有可应用的修改：需要 --path（配 --name/--note/--sidc）或 --patches'));
       exitCode = 2;
       return;
     }
@@ -374,19 +419,20 @@ Future<void> _cmdEdit(List<String> args) async {
         written = positional.first;
       }
     }
-    if (written == null) {
-      _out(_fail('edit', '没有输出路径：请加 --out <文件>（stdin 输入时无法覆盖原文件）'));
-      exitCode = 2;
-      return;
-    }
-    _out(_ok('edit', {
-      'out': written,
+    final data = <String, dynamic>{
       'applied': res.applied,
       'skipped': res.skipped,
       'nodeCount': fixed.count,
       'redCount': report.redCount,
       'warnCount': report.warnCount,
-    }));
+    };
+    if (written != null) {
+      data['out'] = written;
+    } else {
+      // stdin 输入且没有 --out：把结果回给调用方，便于管道继续 validate/render。
+      data['json'] = jsonDecode(json);
+    }
+    _out(_ok('edit', data));
   } catch (e) {
     _out(_fail('edit', '$e'));
     exitCode = 1;
@@ -394,32 +440,38 @@ Future<void> _cmdEdit(List<String> args) async {
 }
 
 Future<void> _cmdNormalize(List<String> args) async {
-  final text = await _readInput(args);
+  final text = await _readInputOrIn(args);
   if (text == null) {
-    _out(_fail('normalize', '没有输入'));
+    _out(_fail('normalize', '没有输入：请传文件路径、--in 或通过 stdin 输入 JSON'));
     exitCode = 2;
     return;
   }
   final levels = _option(args, 'command-levels') ?? '3';
   final output = _option(args, 'out');
   try {
-    final tree = parseTreeJson(text);
+    var tree = parseTreeJson(text);
     if (tree == null) throw const FormatException('JSON 无法解析为编制树');
+    var echelonFixed = 0;
+    if (args.contains('--adapt-for-render')) {
+      // 渲染归一化时按名称兜底修正梯队段，避免「师部及师部营」画错图标。
+      final fix = OrbatAutoFix.fixEchelonReport(tree);
+      tree = fix.tree;
+      echelonFixed = fix.fixed;
+    }
     final json = normalizeTreeJson(tree, commandLevels: levels);
+    final data = <String, dynamic>{
+      'nodeCount': tree.count,
+      'echelonFixed': echelonFixed,
+    };
     if (output != null) {
       await File(output).writeAsString(json);
-      _out(_ok('normalize', {
-            'out': output,
-            'chars': json.length,
-            'nodeCount': tree.count,
-          }));
+      data['out'] = output;
+      data['chars'] = json.length;
     } else {
       // 归一化结果直接作为 data.json 输出（仍包在信封里）
-      _out(_ok('normalize', {
-            'nodeCount': tree.count,
-            'json': jsonDecode(json),
-          }));
+      data['json'] = jsonDecode(json);
     }
+    _out(_ok('normalize', data));
   } catch (e) {
     _out(_fail('normalize', '$e'));
     exitCode = 1;
@@ -489,7 +541,7 @@ Future<void> _cmdRender(List<String> args) async {
       exitCode = 2;
       return;
     }
-    tree = parseTreeJson(f.readAsStringSync());
+    tree = parseTreeJson(_stripBom(f.readAsStringSync()));
     if (tree == null) {
       _out(_fail('render', 'JSON 无法解析为编制树'));
       exitCode = 1;
@@ -513,26 +565,36 @@ Future<void> _cmdRender(List<String> args) async {
     sourceInfo = 'stdin';
   }
 
+  // 梯队兜底由 pipeline.render 内部完成：只修渲染副本，并通过 notices 返回
+  // 修正条数；源 tree 保持不动。这里不再预先修改，否则 notice 永远是 0。
+  final root = tree!;
+
   // 确定输出基名：显式 --out 优先；否则用输入目录 + 日期 + 根名
-  final resolvedBase = outBase ?? () {
-    final inputDir = (inputPath ?? imagePath ?? textPath) != null
-        ? File((inputPath ?? imagePath ?? textPath)!).parent.path
-        : _defaultCliOutputDir();
-    final name = tree!.uniqueDesignation.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
-    final stamp = DateTime.now().toIso8601String().substring(0, 10);
-    return '$inputDir${Platform.pathSeparator}${stamp}_$name';
-  }();
-  final r = await pipeline.render(tree!, outputBase: resolvedBase);
-  _out(_ok('render', {
-        'outputBase': resolvedBase,
-        'source': sourceInfo,
-        'nodeCount': tree.count,
-        'ok': r.ok,
-        'png': r.pngPath,
-        'svg': r.svgPath,
-        'error': r.error,
-        'elapsedMs': r.elapsed.inMilliseconds,
-      }));
+  final resolvedBase = outBase ??
+      () {
+        final inputDir = (inputPath ?? imagePath ?? textPath) != null
+            ? File((inputPath ?? imagePath ?? textPath)!).parent.path
+            : _defaultCliOutputDir();
+        final name =
+            root.uniqueDesignation.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+        final stamp = DateTime.now().toIso8601String().substring(0, 10);
+        return '$inputDir${Platform.pathSeparator}${stamp}_$name';
+      }();
+  final r = await pipeline.render(root, outputBase: resolvedBase);
+  final data = <String, dynamic>{
+    'outputBase': resolvedBase,
+    'source': sourceInfo,
+    'nodeCount': root.count,
+    'ok': r.ok,
+    'png': r.pngPath,
+    'svg': r.svgPath,
+    'error': r.error ?? (r.ok ? null : '渲染失败'),
+    'elapsedMs': r.elapsed.inMilliseconds,
+    'notices': r.notices,
+  };
+  // render 的成败必须同时反映在顶层 ok 和进程退出码上；
+  // 校验红牌仍走 validate 的“报告”语义，不受此影响。
+  _out(_ok('render', data, ok: r.ok));
   if (!r.ok) exitCode = 1;
 }
 
@@ -550,12 +612,13 @@ Future<void> _cmdGenerate(List<String> args) async {
   final settings = await SettingsStore.load();
   // 模式三（Agent 全权）下软件不配 API：generate 必须给出明确指引。
   if (settings.apiKey.trim().isEmpty) {
-    _out(_fail('generate',
+    _out(_fail(
+        'generate',
         '未配置 API Key，无法执行识图。'
-        '若你是 AI Agent（模式三），请用自己的模型读图生成 JSON，'
-        '再调用 parse/validate 校验、render 出图；'
-        '可用 `prompts` 命令导出本软件的工作流提示词。'
-        '或设置 DEEPSEEK_API_KEY 环境变量 / 在 GUI 设置里填 Key。'));
+            '若你是 AI Agent（模式三），请用自己的模型读图生成 JSON，'
+            '再调用 parse/validate 校验、render 出图；'
+            '可用 `prompts` 命令导出本软件的工作流提示词。'
+            '或设置 DEEPSEEK_API_KEY 环境变量 / 在 GUI 设置里填 Key。'));
     exitCode = 2;
     return;
   }
@@ -596,18 +659,18 @@ Future<void> _cmdGenerate(List<String> args) async {
     await File(outJson).writeAsString(json);
   }
   _out(_ok('generate', {
-        'nodeCount': r.tree!.count,
-        'depth': r.tree!.maxDepth,
-        'redCount': r.report?.redCount ?? 0,
-        'warnCount': r.report?.warnCount ?? 0,
-        'aiAttempts': r.aiAttempts,
-        'repairRounds': r.repairRounds,
-        // v0.4：名称与 SIDC 不一致、已按名称自动修正的条数
-        'sidcAuditFixed': r.auditIssues.length,
-        'elapsedMs': r.elapsed.inMilliseconds,
-        'outJson': outJson,
-        if (outJson == null) 'json': jsonDecode(json),
-      }));
+    'nodeCount': r.tree!.count,
+    'depth': r.tree!.maxDepth,
+    'redCount': r.report?.redCount ?? 0,
+    'warnCount': r.report?.warnCount ?? 0,
+    'aiAttempts': r.aiAttempts,
+    'repairRounds': r.repairRounds,
+    // v0.4：名称与 SIDC 不一致、已按名称自动修正的条数
+    'sidcAuditFixed': r.auditIssues.length,
+    'elapsedMs': r.elapsed.inMilliseconds,
+    'outJson': outJson,
+    if (outJson == null) 'json': jsonDecode(json),
+  }));
 }
 
 Future<void> _cmdSelfCheck(List<String> args) async {
@@ -621,18 +684,18 @@ Future<void> _cmdSelfCheck(List<String> args) async {
     mode: settings.mode,
   );
   _out(_ok('selfcheck', {
-        'allOk': r.allOk,
-        'failCount': r.failCount,
-        'warnCount': r.warnCount,
-        'items': r.items
-            .map((i) => {
-                  'name': i.name,
-                  'level': i.level,
-                  'detail': i.detail,
-                  'fix': i.fix,
-                })
-            .toList(),
-      }));
+    'allOk': r.allOk,
+    'failCount': r.failCount,
+    'warnCount': r.warnCount,
+    'items': r.items
+        .map((i) => {
+              'name': i.name,
+              'level': i.level,
+              'detail': i.detail,
+              'fix': i.fix,
+            })
+        .toList(),
+  }));
   if (!r.allOk) exitCode = 3;
 }
 
@@ -640,30 +703,30 @@ Future<void> _cmdUsage(List<String> args) async {
   final s = await UsageStore.summary();
   final recent = await UsageStore.recent(limit: 30);
   _out(_ok('usage', {
-        'today': {
-          'calls': s.todayCalls,
-          'in': s.todayIn,
-          'out': s.todayOut,
-          'total': s.todayTokens,
-        },
-        'month': {
-          'calls': s.monthCalls,
-          'in': s.monthIn,
-          'out': s.monthOut,
-          'total': s.monthTokens,
-        },
-        'totalCalls': s.totalCalls,
-        'recent': recent
-            .map((e) => {
-                  'time': e.time.toIso8601String(),
-                  'scene': e.scene,
-                  'in': e.promptTokens,
-                  'out': e.completionTokens,
-                  'ms': e.ms,
-                  'model': e.model,
-                })
-            .toList(),
-      }));
+    'today': {
+      'calls': s.todayCalls,
+      'in': s.todayIn,
+      'out': s.todayOut,
+      'total': s.todayTokens,
+    },
+    'month': {
+      'calls': s.monthCalls,
+      'in': s.monthIn,
+      'out': s.monthOut,
+      'total': s.monthTokens,
+    },
+    'totalCalls': s.totalCalls,
+    'recent': recent
+        .map((e) => {
+              'time': e.time.toIso8601String(),
+              'scene': e.scene,
+              'in': e.promptTokens,
+              'out': e.completionTokens,
+              'ms': e.ms,
+              'model': e.model,
+            })
+        .toList(),
+  }));
 }
 
 Future<void> _cmdBatch(List<String> args) async {
@@ -731,7 +794,8 @@ Future<void> _cmdBatch(List<String> args) async {
         continue;
       }
       final jsonPath = '$outputBase.json';
-      await File(jsonPath).writeAsString(gen.rawJson ?? normalizeTreeJson(gen.tree!));
+      await File(jsonPath)
+          .writeAsString(gen.rawJson ?? normalizeTreeJson(gen.tree!));
       final r = await pipeline.render(gen.tree!, outputBase: outputBase);
       results.add({
         'file': f.path,
@@ -749,11 +813,11 @@ Future<void> _cmdBatch(List<String> args) async {
 
   final okCount = results.where((r) => r['ok'] == true).length;
   _out(_ok('batch', {
-        'total': results.length,
-        'success': okCount,
-        'failed': results.length - okCount,
-        'results': results,
-      }));
+    'total': results.length,
+    'success': okCount,
+    'failed': results.length - okCount,
+    'results': results,
+  }));
   if (okCount < results.length) exitCode = 3;
 }
 
@@ -766,7 +830,11 @@ Future<void> _cmdRetryTile(List<String> args) async {
   final rows = int.tryParse(_option(args, 'rows') ?? '');
   final cols = int.tryParse(_option(args, 'cols') ?? '');
 
-  if (imagePath == null || row == null || col == null || rows == null || cols == null) {
+  if (imagePath == null ||
+      row == null ||
+      col == null ||
+      rows == null ||
+      cols == null) {
     _out(_fail('retry-tile',
         '需要 --image <图> --row N --col N --rows N --cols N [--out <json>]'));
     exitCode = 2;
@@ -796,13 +864,13 @@ Future<void> _cmdRetryTile(List<String> args) async {
   final json = normalizeTreeJson(r.tree!);
   if (outJson != null) await File(outJson).writeAsString(json);
   _out(_ok('retry-tile', {
-        'row': row,
-        'col': col,
-        'nodeCount': r.tree!.count,
-        'root': r.tree!.uniqueDesignation,
-        'outJson': outJson,
-        if (outJson == null) 'json': jsonDecode(json),
-      }));
+    'row': row,
+    'col': col,
+    'nodeCount': r.tree!.count,
+    'root': r.tree!.uniqueDesignation,
+    'outJson': outJson,
+    if (outJson == null) 'json': jsonDecode(json),
+  }));
 }
 
 String _ext(String path) {
@@ -876,27 +944,29 @@ Future<void> _cmdPrompts(List<String> args) async {
   }
 
   _out(_ok('prompts', {
-        'type': which,
-        'count': selected.length,
-        'out': savedPath,
-        'prompts': selected,
-        'note': '模式三：Agent 用这些提示词调用自己的模型，再用 parse/validate/render 完成出图',
-      }));
+    'type': which,
+    'count': selected.length,
+    'out': savedPath,
+    'prompts': selected,
+    'note': '模式三：Agent 用这些提示词调用自己的模型，再用 parse/validate/render 完成出图',
+  }));
 }
 
 Future<void> _cmdConfig(List<String> args) async {
   final s = await SettingsStore.load();
   _out(_ok('config', {
-        'configVersion': s.configVersion,
-        'currentConfigVersion': SettingsStore.currentConfigVersion,
-        'model': s.model,
-        'knownModels': SettingsStore.knownModels,
-        'hasApiKey': s.apiKey.isNotEmpty,
-        'apiKeyFingerprint': AppLogger.keyFingerprint(s.apiKey),
-        'whiteBackground': s.whiteBackground,
-        'renderScriptPath': s.renderScriptPath,
-        'lastDir': s.lastDir,
-      }));
+    'version': kAppVersion,
+    'protocol': kCliProtocolVersion,
+    'configVersion': s.configVersion,
+    'currentConfigVersion': SettingsStore.currentConfigVersion,
+    'model': s.model,
+    'knownModels': SettingsStore.knownModels,
+    'hasApiKey': s.apiKey.isNotEmpty,
+    'apiKeyFingerprint': AppLogger.keyFingerprint(s.apiKey),
+    'whiteBackground': s.whiteBackground,
+    'renderScriptPath': s.renderScriptPath,
+    'lastDir': s.lastDir,
+  }));
 }
 
 // ---------- 工具 ----------
@@ -924,11 +994,12 @@ ORBAT CLI —— 编制图生成器的命令行接口
 
 用法:
   orbat.bat <命令> [选项] [文件]
+  orbat.bat --version
 
 命令:
   parse      解析 JSON，输出节点数/层级/根名
   validate   校验 JSON，输出全部问题（红牌时 exit=3）
-  audit      一致性审计 + 跨父同名扫描（模型码与名称不自洽时给建议值）
+  audit      一致性审计 + 跨父同名扫描（只读；--strict 时红牌 exit=3）
   edit       按路径改单位名称/注释/SIDC（补丁式，不重写整棵树）
   normalize  归一化为渲染器要求的 7 键结构
   render     出图（PNG + SVG）
@@ -936,43 +1007,64 @@ ORBAT CLI —— 编制图生成器的命令行接口
   selfcheck  检查本机依赖（node/浏览器/脚本/网络）
   usage      查看 API 调用次数与 token 消耗
   config     查看当前配置（API Key 只显示指纹）
+  tutorial   打印/导出内置纯文字教程
   batch      批量识图+出图（目录里所有图片）
   retry-tile 单独重跑某个识别失败的图块
   prompts    导出软件内置工作流提示词（模式三给 Agent 用，零 API）
 
 输入方式:
-  所有接受 JSON 的命令都支持：
-    · 文件参数:  orbat.bat validate 编制.json
-    · stdin 管道: cat 编制.json | orbat.bat validate
-  优先级：stdin > 文件参数
+  · --in 文件:  orbat.bat validate --in 编制.json
+  · 文件参数:   orbat.bat validate 编制.json
+  · stdin 管道: cat 编制.json | orbat.bat validate
+  优先级：--in > 文件参数 > stdin（没有文件参数时才读 stdin）
 
 常用选项:
-  --in <json>           render 的输入 JSON
+  --in <json>           JSON 命令的输入文件
+  --out <path>          输出路径/基名
   --image <img>         generate/render 的输入图片
   --text <txt>          generate/render 的输入文本
   --extra <str>         generate 的补充说明
-  --out <path>          输出路径/基名
   --raw-names           generate 时保留原文称号/番号（默认译成中文）
-  --smoke               selfcheck 时真渲染一次，验证出图链路（约 15-25 秒）
-  --no-white-bg         render 输出透明底 PNG
+  --adapt-for-render    normalize 时按名称修正梯队段（仅影响渲染副本）
   --command-levels 3    normalize 的 commandLevels
+  --no-white-bg         render 输出透明底 PNG
+  --white-bg false      同上，显式关闭白底
+  --smoke               selfcheck 时真渲染一次（约 15-25 秒）
+
+edit/audit:
+  --path <路径>         目标节点路径，如 "根/第1旅/第2营"
+  --patches <json>      批量补丁文件
+  --name/--note/--sidc  edit 要改的字段
+  --strict              audit 红牌时 exit=3（默认只报告，不改变 exit）
+  --fail-on-red         --strict 的别名
+
+batch / tutorial / prompts / retry-tile:
+  --dir <dir>           batch 输入目录
+  --out-dir <dir>       batch 输出目录
+  --recursive           batch 递归子目录
+  --lang zh|en          tutorial 语言
+  --type tile|full|all  prompts 类型
+  --row/--col/--rows/--cols  retry-tile 切片参数
 
 输出约定:
   stdout 永远是一个 JSON 对象: {"ok":bool,"command":..,"data":{..},"error":..}
   stderr 只放诊断信息
-  exit code: 0=成功 1=执行失败 2=参数错误 3=校验/自检发现问题
+  exit code: 0=成功 1=执行失败 2=参数错误 3=校验/自检/批量/audit --strict 发现问题
+  render 失败时顶层 ok=false 且 exit=1；validate 红牌仍返回顶层 ok=true、exit=3
 
 示例:
-  orbat.bat validate 编制.json
+  orbat.bat --version
+  orbat.bat validate --in 编制.json
   orbat.bat render --in 编制.json --out 输出名 --no-white-bg
+  orbat.bat normalize --in 编制.json --adapt-for-render
   orbat.bat generate --image 图.png --out 编制.json
   orbat.bat generate --image 图.png --raw-names --out 原文.json
   orbat.bat audit 编制.json
+  orbat.bat audit 编制.json --strict
   orbat.bat edit 编制.json --path "根/第1旅/第2营" --name "第2营" --note "Kensington"
+  cat 编制.json | orbat.bat edit --path "根/第1旅" --name "第1旅"
   orbat.bat selfcheck --smoke
-  orbat.bat selfcheck
 ''';
-
 
 /// CLI 入口：跑完强制退出。
 /// Dart CLI 里即使不读 stdin，事件循环也可能因为全局订阅不结束，

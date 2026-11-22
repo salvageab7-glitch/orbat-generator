@@ -4,6 +4,20 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val releaseSigningValues = listOf(
+    System.getenv("ORBAT_RELEASE_KEYSTORE"),
+    System.getenv("ORBAT_RELEASE_STORE_PASSWORD"),
+    System.getenv("ORBAT_RELEASE_KEY_ALIAS"),
+    System.getenv("ORBAT_RELEASE_KEY_PASSWORD"),
+)
+val releaseSigningConfigured = releaseSigningValues.all { !it.isNullOrBlank() }
+if (releaseSigningValues.any { !it.isNullOrBlank() } && !releaseSigningConfigured) {
+    throw GradleException(
+        "Release signing requires ORBAT_RELEASE_KEYSTORE, ORBAT_RELEASE_STORE_PASSWORD, " +
+            "ORBAT_RELEASE_KEY_ALIAS, and ORBAT_RELEASE_KEY_PASSWORD."
+    )
+}
+
 android {
     namespace = "com.orbat.orbat_core"
     // 固定 36：file_picker 等插件要求 compileSdk >= 36（flutter 默认值偏低）
@@ -30,11 +44,22 @@ android {
         versionName = flutter.versionName
     }
 
+    if (releaseSigningConfigured) {
+        signingConfigs.create("release") {
+            storeFile = file(requireNotNull(releaseSigningValues[0]))
+            storePassword = requireNotNull(releaseSigningValues[1])
+            keyAlias = requireNotNull(releaseSigningValues[2])
+            keyPassword = requireNotNull(releaseSigningValues[3])
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // Never sign distribution artifacts with the public debug keystore.
+            // Without all release secrets, Gradle leaves the release artifact unsigned.
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 }

@@ -1,5 +1,7 @@
 #include "win32_window.h"
 
+#include <algorithm>
+
 #include <dwmapi.h>
 #include <flutter_windows.h>
 
@@ -134,10 +136,39 @@ bool Win32Window::Create(const std::wstring& title,
   UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
   double scale_factor = dpi / 96.0;
 
+  // ---- 自适应初始尺寸 ----
+  // 目标 1920x1080（逻辑像素），但不超过屏幕工作区的 92%，并居中显示。
+  // 为什么不能直接写死 1920x1080：1366x768 或 125% 缩放的笔记本上会超出屏幕，
+  // 标题栏跑到屏幕外就再也拖不回来。这里按工作区收缩，小屏也一定能放下。
+  int window_width = Scale(size.width, scale_factor);
+  int window_height = Scale(size.height, scale_factor);
+  int window_x = Scale(origin.x, scale_factor);
+  int window_y = Scale(origin.y, scale_factor);
+
+  RECT work_area = {};
+  if (::SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0)) {
+    const int area_width = work_area.right - work_area.left;
+    const int area_height = work_area.bottom - work_area.top;
+    const int avail_width = area_width * 92 / 100;
+    const int avail_height = area_height * 92 / 100;
+    const int cap_width = Scale(1920, scale_factor);
+    const int cap_height = Scale(1080, scale_factor);
+    // 下限 1024x680：再小界面会被挤坏；但屏幕上实在放不下时就以屏幕为准
+    const int min_width = std::min(Scale(1024, scale_factor), avail_width);
+    const int min_height = std::min(Scale(680, scale_factor), avail_height);
+
+    window_width = std::max(
+        min_width, std::min(window_width, std::min(cap_width, avail_width)));
+    window_height = std::max(
+        min_height, std::min(window_height, std::min(cap_height, avail_height)));
+
+    window_x = work_area.left + (area_width - window_width) / 2;
+    window_y = work_area.top + (area_height - window_height) / 2;
+  }
+
   HWND window = CreateWindow(
       window_class, title.c_str(), WS_OVERLAPPEDWINDOW,
-      Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
-      Scale(size.width, scale_factor), Scale(size.height, scale_factor),
+      window_x, window_y, window_width, window_height,
       nullptr, nullptr, GetModuleHandle(nullptr), this);
 
   if (!window) {

@@ -176,9 +176,12 @@ class CDP {
   }
 }
 
-async function launch(port, userData, extraArgs = []) {
+async function launch(userData, extraArgs = [], onSpawned = null) {
   fs.mkdirSync(userData, { recursive: true });
-  const logPath = path.join(process.env.ORBAT_WORK_DIR || os.tmpdir(), "browser-" + port + ".log");
+  const logPath = path.join(
+    process.env.ORBAT_WORK_DIR || os.tmpdir(),
+    "browser-" + path.basename(userData) + ".log"
+  );
   const out = fs.openSync(logPath, "w");
   try { console.log(`browser: ${path.basename(CHROME)}  (${CHROME})`); } catch (_) {}
   const proc = spawn(
@@ -189,38 +192,77 @@ async function launch(port, userData, extraArgs = []) {
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-extensions",
-      "--no-sandbox",
       "--disable-breakpad",
       "--disable-crash-reporter",
       "--disable-features=Crashpad",
       "--window-size=2400,1400",
-      `--remote-debugging-port=${port}`,
+      "--remote-debugging-address=127.0.0.1",
+      // Port 0 asks Chromium to select an ephemeral port and record it under this
+      // process-specific profile, avoiding fixed-port collisions and stale CDP reuse.
+      "--remote-debugging-port=0",
       `--user-data-dir=${userData}`,
       ...extraArgs,
       "about:blank",
     ],
     { stdio: ["ignore", out, out] }
   );
+  if (typeof onSpawned === "function") onSpawned(proc);
   try {
+    let endpoint;
     await waitFor(async () => {
       try {
-        const r = await fetch(`http://127.0.0.1:${port}/json/version`);
-        return r.ok;
-      } catch (e) {
+        if (proc.exitCode !== null || proc.signalCode !== null) return false;
+        const activePortPath = path.join(userData, "DevToolsActivePort");
+        const lines = fs.readFileSync(activePortPath, "utf8").trim().split(/\r?\n/);
+        const port = Number(lines[0]);
+        const browserPath = lines[1];
+        if (!Number.isInteger(port) || port < 1 || port > 65535 ||
+            !browserPath || !browserPath.startsWith("/devtools/browser/")) return false;
+        const response = await fetch(`http://127.0.0.1:${port}/json/version`, {
+          signal: AbortSignal.timeout(2000),
+        });
+        if (!response.ok) return false;
+        const version = await response.json();
+        const ws = new URL(version.webSocketDebuggerUrl);
+        if (Number(ws.port) !== port || ws.pathname !== browserPath) return false;
+        endpoint = { port, browserWebSocketUrl: version.webSocketDebuggerUrl };
+        return true;
+      } catch (_) {
         return false;
       }
-    }, 40000, 500, "浏览器调试端口");
+    }, 40000, 500, "本次浏览器调试端口");
+    console.log("[stage] 浏览器就绪");
+    return { process: proc, ...endpoint };
   } catch (e) {
     try { console.log("--- browser log ---\n" + fs.readFileSync(logPath, "utf8").slice(-2000)); } catch (_) {}
+    try { proc.kill(); } catch (_) {}
     throw e;
+  } finally {
+    try { fs.closeSync(out); } catch (_) {}
   }
-  console.log("[stage] 浏览器就绪");
-  return proc;
 }
 
-async function connect(port) {
-  const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((r) => r.json());
-  const page = targets.find((t) => t.type === "page");
+async function connect(chrome) {
+  if (!chrome || chrome.process.exitCode !== null || chrome.process.signalCode !== null) {
+    throw new Error("本次启动的 Chromium 进程已退出");
+  }
+  const versionResponse = await fetch(`http://127.0.0.1:${chrome.port}/json/version`, {
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!versionResponse.ok) throw new Error("无法读取本次 Chromium 的 CDP 信息");
+  const version = await versionResponse.json();
+  if (version.webSocketDebuggerUrl !== chrome.browserWebSocketUrl) {
+    throw new Error("CDP 端点与本次启动的 Chromium 不匹配");
+  }
+  const targetsResponse = await fetch(`http://127.0.0.1:${chrome.port}/json/list`, {
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!targetsResponse.ok) throw new Error("无法读取 Chromium 页面目标");
+  const targets = await targetsResponse.json();
+  const page = targets.find((t) => t.type === "page" && t.url === "about:blank");
+  if (!page || !page.webSocketDebuggerUrl) {
+    throw new Error("本次 Chromium 未提供初始页面 CDP 目标");
+  }
   const cdp = new CDP(page.webSocketDebuggerUrl);
   await cdp.open();
   await cdp.send("Page.enable");

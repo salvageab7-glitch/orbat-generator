@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "ORBAT agent tools",
+    "description": "Validate and render ORBAT JSON with an in-app settings page for PNG background and output directory. Runs a workflow self-check; securely provisions pinned Node.js 24+ when needed, then renders through spatialillusions.com in Chrome or Edge."
+  }
+}

@@ -25,8 +25,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
   FlutterWindow window(project);
-  Win32Window::Point origin(10, 10);
-  Win32Window::Size size(1500, 950);
+  // 初始 1920x1080（逻辑像素）；Win32Window::Create 会按屏幕工作区收缩并居中。
+  Win32Window::Point origin(0, 0);
+  Win32Window::Size size(1920, 1080);
   // Title uses Unicode escapes so MSVC's source charset never matters.
   if (!window.Create(L"\u7F16\u5236\u56FE\u751F\u6210\u5668", origin, size)) {
     return EXIT_FAILURE;

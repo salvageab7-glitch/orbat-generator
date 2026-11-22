@@ -87,6 +87,7 @@ class _HomePageState extends State<HomePage> {
     final sw = MediaQuery.of(context).size.width;
     return sw - 48 < desktop ? sw - 48 : desktop;
   }
+
   String _stage = tr('就绪');
   final List<String> _log = [];
 
@@ -121,10 +122,13 @@ class _HomePageState extends State<HomePage> {
       _report = report;
     });
     _appendLog(
-        '手工 JSON 校验：${parsed.count} 节点，红牌 ${report.redCount}，软警告 ${report.warnCount}');
-    _snack(report.ok
-        ? '校验通过：${parsed.count} 节点，${report.warnCount} 条提示'
-        : '发现 ${report.redCount} 个红牌错误，详见结构视图');
+      '手工 JSON 校验：${parsed.count} 节点，红牌 ${report.redCount}，软警告 ${report.warnCount}',
+    );
+    _snack(
+      report.ok
+          ? '校验通过：${parsed.count} 节点，${report.warnCount} 条提示'
+          : '发现 ${report.redCount} 个红牌错误，详见结构视图',
+    );
   }
 
   // ---------------------------------------------------------------- 动作
@@ -148,7 +152,7 @@ class _HomePageState extends State<HomePage> {
         'bmp',
         'pdf',
         'doc',
-        'docx'
+        'docx',
       ],
       allowMultiple: false,
       dialogTitle: '选择编制资料（图片 / PDF / DOC）',
@@ -168,13 +172,15 @@ class _HomePageState extends State<HomePage> {
         builder: (ctx) => AlertDialog(
           title: Text(tr('PDF / DOC 会显著增加消耗')),
           content: Text(
-            tr('把一个 PDF 交给视觉模型，需要逐页转成图片，'
-                'token 消耗通常是单张图片的 3-10 倍，页数多的文件尤其明显。\n\n'
-                '更省的做法：\n'
-                '· 只截取需要的那一页导出为 PNG 再导入\n'
-                '· 或把文字复制到「纯文本」模式\n\n'
-                '当前版本尚未开放 PDF/DOC 的直接解析，'
-                '继续会提示你改用截图或文本。'),
+            tr(
+              '把一个 PDF 交给视觉模型，需要逐页转成图片，'
+              'token 消耗通常是单张图片的 3-10 倍，页数多的文件尤其明显。\n\n'
+              '更省的做法：\n'
+              '· 只截取需要的那一页导出为 PNG 再导入\n'
+              '· 或把文字复制到「纯文本」模式\n\n'
+              '当前版本尚未开放 PDF/DOC 的直接解析，'
+              '继续会提示你改用截图或文本。',
+            ),
           ),
           actions: [
             TextButton(
@@ -211,7 +217,10 @@ class _HomePageState extends State<HomePage> {
       OrbatPipeline.androidRenderHook = (normalizedJson, outputBase) async {
         if (!mounted) {
           return RenderResult(
-              ok: false, error: '界面已关闭，无法出图', elapsed: Duration.zero);
+            ok: false,
+            error: '界面已关闭，无法出图',
+            elapsed: Duration.zero,
+          );
         }
         final result = await Navigator.of(context).push<RenderResult>(
           MaterialPageRoute(
@@ -225,11 +234,15 @@ class _HomePageState extends State<HomePage> {
         return result ??
             RenderResult(ok: false, error: '出图被取消', elapsed: Duration.zero);
       };
-      // 插件交接：Agent 可用 intent 直接触发批处理
+      // 插件 intent 和启动自动扫描仅在用户明确选择模式三后生效。
       //   am start -a com.orbat.orbat_core.plugin.RUN
       const pluginChannel = MethodChannel('orbat/storage');
       pluginChannel.setMethodCallHandler((call) async {
         if (call.method == 'pluginRun') {
+          if (widget.settings.mode != 2) {
+            AppLogger.instance.info('plugin', '忽略外部触发：用户未选择 Agent 插件模式');
+            return;
+          }
           // 先切回主界面（渲染页可能还压在栈顶）
           if (mounted && Navigator.of(context).canPop()) {
             Navigator.of(context).popUntil((r) => r.isFirst);
@@ -240,23 +253,31 @@ class _HomePageState extends State<HomePage> {
       // 冷启动时 intent 先于 Dart 到达：向原生拉取挂起的触发
       Timer(const Duration(milliseconds: 1200), () async {
         try {
-          final pending =
-              await pluginChannel.invokeMethod<bool>('consumePendingRun');
+          final pending = await pluginChannel.invokeMethod<bool>(
+            'consumePendingRun',
+          );
           if (pending == true) {
-            await _runPluginBridge();
+            if (widget.settings.mode == 2) {
+              await _runPluginBridge();
+            } else {
+              AppLogger.instance.info('plugin', '忽略冷启动触发：用户未选择 Agent 插件模式');
+            }
             return;
           }
         } catch (_) {}
         // 确定性的「打开即处理」：不依赖 intent 残留——只要权限已授且
         // 交接目录有待处理 JSON，打开 App 就自动跑批（手机端 Agent 主路径）
         Timer(const Duration(milliseconds: 800), () async {
-          if (!mounted || _busy) return;
+          if (!mounted || _busy || widget.settings.mode != 2) return;
           try {
-            final granted =
-                await pluginChannel.invokeMethod<bool>('isManageStorageGranted');
+            final granted = await pluginChannel.invokeMethod<bool>(
+              'isManageStorageGranted',
+            );
             if (granted != true) return;
             PluginBridge.ensureDirs();
-            if (PluginBridge.scanInbox().isNotEmpty) await _runPluginBridge();
+            if ((await PluginBridge.scanInbox()).isNotEmpty) {
+              await _runPluginBridge();
+            }
           } catch (_) {}
         });
       });
@@ -311,8 +332,10 @@ class _HomePageState extends State<HomePage> {
       }
       // 首次启动自动跑一次自检（含出图冒烟）：新用户第一件事就知道环境行不行
       if (!hasCliTask && !widget.settings.firstRunSelfCheckDone) {
-        Timer(const Duration(milliseconds: 1800),
-            () => _runSelfCheck(markFirstRun: true));
+        Timer(
+          const Duration(milliseconds: 1800),
+          () => _runSelfCheck(markFirstRun: true),
+        );
       }
     }
   }
@@ -362,16 +385,29 @@ class _HomePageState extends State<HomePage> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  tf('检测到系统语言 {loc}，已默认选中对应语言；之后可随时在设置里更改。',
-                      {'loc': L10n.systemLanguageLabel}),
-                  style:
-                      TextStyle(fontSize: 12, color: Theme.of(ctx2).hintColor),
+                  tf('检测到系统语言 {loc}，已默认选中对应语言；之后可随时在设置里更改。', {
+                    'loc': L10n.systemLanguageLabel,
+                  }),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(ctx2).hintColor,
+                  ),
                 ),
                 const SizedBox(height: 12),
-                _pickOption(ctx2, () => setD(() => picked = AppLang.zh),
-                    picked == AppLang.zh, '中文', tr('简体中文界面')),
-                _pickOption(ctx2, () => setD(() => picked = AppLang.en),
-                    picked == AppLang.en, 'English', 'English interface'),
+                _pickOption(
+                  ctx2,
+                  () => setD(() => picked = AppLang.zh),
+                  picked == AppLang.zh,
+                  '中文',
+                  tr('简体中文界面'),
+                ),
+                _pickOption(
+                  ctx2,
+                  () => setD(() => picked = AppLang.en),
+                  picked == AppLang.en,
+                  'English',
+                  'English interface',
+                ),
               ],
             ),
           ),
@@ -389,8 +425,7 @@ class _HomePageState extends State<HomePage> {
     widget.settings.languageChosen = true;
     applyLanguage(widget.settings.language);
     await widget.settings.save();
-    AppLogger.instance
-        .info('ui', '首次启动选择界面语言: ${widget.settings.language}');
+    AppLogger.instance.info('ui', '首次启动选择界面语言: ${widget.settings.language}');
   }
 
   /// 首次启动：选择使用模式
@@ -412,21 +447,43 @@ class _HomePageState extends State<HomePage> {
               children: [
                 Text(
                   tr('三种模式可随时在设置里切换；只有模式一、模式二需要 DeepSeek API Key。'),
-                  style:
-                      TextStyle(fontSize: 12, color: Theme.of(ctx2).hintColor),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(ctx2).hintColor,
+                  ),
                 ),
                 const SizedBox(height: 12),
-                _modeOption(ctx2, setD, 0, tr('模式一 · 纯软件'),
-                    tr('在本软件界面里识图、校验、出图。需要 API Key。')),
+                _modeOption(
+                  ctx2,
+                  setD,
+                  0,
+                  tr('模式一 · 纯软件'),
+                  tr('在本软件界面里识图、校验、出图。需要 API Key。'),
+                ),
                 // 安卓端暂不支持模式二（无 CLI）
                 if (!Platform.isAndroid)
-                  _modeOption(ctx2, setD, 1, tr('模式二 · 软件 + CLI'),
-                      tr('软件里配 Key，命令行 orbat-cli 供脚本 / Agent 调用。需要 API Key。'))
+                  _modeOption(
+                    ctx2,
+                    setD,
+                    1,
+                    tr('模式二 · 软件 + CLI'),
+                    tr('软件里配 Key，命令行 orbat-cli 供脚本 / Agent 调用。需要 API Key。'),
+                  )
                 else
-                  _modeOption(ctx2, setD, 1, tr('模式二 · 软件 + CLI（安卓暂不支持）'),
-                      tr('CLI 依赖桌面环境，安卓端二期再评估。请选模式一或模式三。')),
-                _modeOption(ctx2, setD, 2, tr('模式三 · Agent 插件（无需 API Key）'),
-                    tr('用 orbat-cli prompts 导出提示词交给外部 Agent 识图；本软件不配 Key。')),
+                  _modeOption(
+                    ctx2,
+                    setD,
+                    1,
+                    tr('模式二 · 软件 + CLI（安卓暂不支持）'),
+                    tr('CLI 依赖桌面环境，安卓端二期再评估。请选模式一或模式三。'),
+                  ),
+                _modeOption(
+                  ctx2,
+                  setD,
+                  2,
+                  tr('模式三 · Agent 插件（无需 API Key）'),
+                  tr('用 orbat-cli prompts 导出提示词交给外部 Agent 识图；本软件不配 Key。'),
+                ),
               ],
             ),
           ),
@@ -447,8 +504,10 @@ class _HomePageState extends State<HomePage> {
     widget.settings.modeChosen = true;
     setState(() {});
     await widget.settings.save();
-    AppLogger.instance
-        .info('ui', '首次启动选择模式: ${widget.settings.mode}（confirmed=$ok）');
+    AppLogger.instance.info(
+      'ui',
+      '首次启动选择模式: ${widget.settings.mode}（confirmed=$ok）',
+    );
 
     if (widget.settings.mode == 2) {
       if (mounted) await _explainAgentMode();
@@ -461,14 +520,29 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// 模式选项卡片（选中态高亮）
-  Widget _modeOption(BuildContext ctx, StateSetter setD, int value, String title,
-          String subtitle) =>
-      _pickOption(ctx, () => setD(() => widget.settings.mode = value),
-          widget.settings.mode == value, title, subtitle);
+  Widget _modeOption(
+    BuildContext ctx,
+    StateSetter setD,
+    int value,
+    String title,
+    String subtitle,
+  ) =>
+      _pickOption(
+        ctx,
+        () => setD(() => widget.settings.mode = value),
+        widget.settings.mode == value,
+        title,
+        subtitle,
+      );
 
   /// 通用单选项卡片：语言、模式共用（只有一处样式，避免两套视觉）
-  Widget _pickOption(BuildContext ctx, VoidCallback onTap, bool selected,
-      String title, String subtitle) {
+  Widget _pickOption(
+    BuildContext ctx,
+    VoidCallback onTap,
+    bool selected,
+    String title,
+    String subtitle,
+  ) {
     final scheme = Theme.of(ctx).colorScheme;
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
@@ -498,13 +572,21 @@ class _HomePageState extends State<HomePage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(title,
-                        style: const TextStyle(
-                            fontSize: 13, fontWeight: FontWeight.w600)),
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                     const SizedBox(height: 2),
-                    Text(subtitle,
-                        style: TextStyle(
-                            fontSize: 11, color: Theme.of(ctx).hintColor)),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Theme.of(ctx).hintColor,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -524,11 +606,13 @@ class _HomePageState extends State<HomePage> {
         content: SizedBox(
           width: _dialogW(520),
           child: Text(
-            tr('本软件不会向你要 Key。工作方式是：\n\n'
-                '1. 用 orbat-cli prompts 导出识图提示词；\n'
-                '2. 把提示词和图交给你的 Agent（它用自己的模型）；\n'
-                '3. 把 Agent 产出的 JSON 贴回本软件，校验与出图仍然可用。\n\n'
-                '之后想在界面里直接识图，随时在设置里切到模式一/二并填写 Key。'),
+            tr(
+              '本软件不会向你要 Key。工作方式是：\n\n'
+              '1. 用 orbat-cli prompts 导出识图提示词；\n'
+              '2. 把提示词和图交给你的 Agent（它用自己的模型）；\n'
+              '3. 把 Agent 产出的 JSON 贴回本软件，校验与出图仍然可用。\n\n'
+              '之后想在界面里直接识图，随时在设置里切到模式一/二并填写 Key。',
+            ),
             style: const TextStyle(fontSize: 12, height: 1.6),
           ),
         ),
@@ -548,11 +632,15 @@ class _HomePageState extends State<HomePage> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(tr('先配置 API Key')),
-        content: Text(tr('识图功能需要 DeepSeek API Key：\n\n'
+        content: Text(
+          tr(
+            '识图功能需要 DeepSeek API Key：\n\n'
             '1. 在 platform.deepseek.com 注册并创建 API Key；\n'
             '2. 点下方「打开设置」粘贴 Key；\n'
             '3. 出图功能不需要 Key，但需要安装 Node.js 24 或更高版本。\n\n'
-            '之后可随时在右上角设置里修改。')),
+            '之后可随时在右上角设置里修改。',
+          ),
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
@@ -590,8 +678,10 @@ class _HomePageState extends State<HomePage> {
         widget.settings.lastDir = File(path).parent.path;
       });
       await widget.settings.save();
-      _appendLog('已载入 ${File(path).uri.pathSegments.last}：${parsed.count} 节点，'
-          '红牌 ${report.redCount}，软警告 ${report.warnCount}');
+      _appendLog(
+        '已载入 ${File(path).uri.pathSegments.last}：${parsed.count} 节点，'
+        '红牌 ${report.redCount}，软警告 ${report.warnCount}',
+      );
     } catch (e) {
       _snack('读取失败：$e');
     }
@@ -612,9 +702,11 @@ class _HomePageState extends State<HomePage> {
   Future<void> _generate() async {
     if (_busy) return;
     if (widget.settings.apiKey.trim().isEmpty) {
-      _snack(widget.settings.mode == 2
-          ? tr('模式三由外部 Agent 识图，本软件不配 Key；要在界面识图请切到模式一/二并填写 Key')
-          : tr('请先在右上角设置里填写 DeepSeek API Key'));
+      _snack(
+        widget.settings.mode == 2
+            ? tr('模式三由外部 Agent 识图，本软件不配 Key；要在界面识图请切到模式一/二并填写 Key')
+            : tr('请先在右上角设置里填写 DeepSeek API Key'),
+      );
       return;
     }
     if (_inputMode == InputMode.textOnly && _textCtrl.text.trim().isEmpty) {
@@ -636,9 +728,10 @@ class _HomePageState extends State<HomePage> {
 
     AppLogger.instance.section('生成编制');
     AppLogger.instance.info(
-        'ui',
-        '生成: image=${_image?.path ?? "无"} '
-            'text=${_textCtrl.text.trim().length}字');
+      'ui',
+      '生成: image=${_image?.path ?? "无"} '
+          'text=${_textCtrl.text.trim().length}字',
+    );
     setState(() {
       _busy = true;
       _tree = null;
@@ -678,9 +771,11 @@ class _HomePageState extends State<HomePage> {
         _jsonText = result.rawJson ?? '';
         _jsonCtrl.text = _jsonText;
       });
-      _appendLog('生成完成：${result.tree!.count} 节点，'
-          '红牌 ${result.report?.redCount ?? 0}，'
-          '修复 ${result.repairRounds} 轮，${result.elapsed.inSeconds}s');
+      _appendLog(
+        '生成完成：${result.tree!.count} 节点，'
+        '红牌 ${result.report?.redCount ?? 0}，'
+        '修复 ${result.repairRounds} 轮，${result.elapsed.inSeconds}s',
+      );
     } catch (e) {
       _appendLog('异常：$e');
       _snack('异常：$e');
@@ -757,7 +852,8 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     // 安卓走 WebView 线上渲染，不需要本地渲染脚本
-    if (!Platform.isAndroid && widget.settings.renderScriptPath.trim().isEmpty) {
+    if (!Platform.isAndroid &&
+        widget.settings.renderScriptPath.trim().isEmpty) {
       _snack(tr('请在设置里指定渲染脚本 render_orbat.js 的路径'));
       return;
     }
@@ -794,7 +890,8 @@ class _HomePageState extends State<HomePage> {
       if (settings.emitJson) {
         final jsonPath = '$base.json';
         await File(jsonPath).writeAsString(
-            _jsonText.isNotEmpty ? _jsonText : normalizeTreeJson(tree));
+          _jsonText.isNotEmpty ? _jsonText : normalizeTreeJson(tree),
+        );
         savedJson = jsonPath;
         _appendLog('JSON 已保存：$jsonPath');
       }
@@ -820,6 +917,9 @@ class _HomePageState extends State<HomePage> {
       );
 
       _renderTicker?.cancel();
+      for (final notice in result.notices) {
+        _appendLog(notice);
+      }
       // SVG 不勾选 → 删掉渲染脚本生成的 SVG
       var svgPath = result.svgPath;
       if (result.ok && !settings.emitSvg && svgPath != null) {
@@ -855,8 +955,10 @@ class _HomePageState extends State<HomePage> {
           if (pngPath != null) 'PNG',
           if (svgPath != null) 'SVG',
         ].join(' + ');
-        AppLogger.instance.info('ui',
-            '出图完成: $saved @ ${settings.outputDir.isEmpty ? "默认目录" : settings.outputDir} (${result.elapsed.inSeconds}s)');
+        AppLogger.instance.info(
+          'ui',
+          '出图完成: $saved @ ${settings.outputDir.isEmpty ? "默认目录" : settings.outputDir} (${result.elapsed.inSeconds}s)',
+        );
         _appendLog('出图完成（$saved）：$base（${result.elapsed.inSeconds}s）');
         // 窄屏：出图完成后自动切到预览页，让用户直接看到图
         if (MediaQuery.of(context).size.width < 640) {
@@ -900,7 +1002,7 @@ class _HomePageState extends State<HomePage> {
   /// Agent 把编制 JSON 放 Download/orbat_inbox/ → 这里一键批量
   /// 校验 + 出图 → 产物与报告写 orbat_outbox/ → Agent 取走结果。
   Future<void> _runPluginBridge() async {
-    if (!Platform.isAndroid) return;
+    if (!Platform.isAndroid || widget.settings.mode != 2 || _busy) return;
     const channel = MethodChannel('orbat/storage');
     bool granted = false;
     try {
@@ -915,7 +1017,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     PluginBridge.ensureDirs();
-    final files = PluginBridge.scanInbox();
+    final files = await PluginBridge.scanInbox();
     if (files.isEmpty) {
       _snack(tf('交接目录没有待处理 JSON：{p}', {'p': PluginBridge.inboxDir}));
       return;
@@ -943,8 +1045,10 @@ class _HomePageState extends State<HomePage> {
     try {
       var done = 0;
       for (final f in files) {
-        final r = await PluginBridge.processOne(f,
-            (nj, ob) => pipeline.render(parseTreeJson(nj)!, outputBase: ob));
+        final r = await PluginBridge.processOne(
+          f,
+          (nj, ob) => pipeline.render(parseTreeJson(nj)!, outputBase: ob),
+        );
         done++;
         if (r['ok'] == true) okCount++;
         if (r['render']['ok'] == true) renderOk++;
@@ -954,19 +1058,23 @@ class _HomePageState extends State<HomePage> {
           'done': done,
           'current': r['file'],
         });
-        _appendLog(tf('插件处理 {f}：校验{v}，出图{g}', {
-          'f': r['file'],
-          'v': r['ok'] == true
-              ? tr('通过（红牌 0）')
-              : '${tr('红牌')} ${(r['red'] as List).length}',
-          'g': r['render']['ok'] == true ? tr('成功') : tr('失败'),
-        }));
+        _appendLog(
+          tf('插件处理 {f}：校验{v}，出图{g}', {
+            'f': r['file'],
+            'v': r['ok'] == true
+                ? tr('通过（红牌 0）')
+                : '${tr('红牌')} ${(r['red'] as List).length}',
+            'g': r['render']['ok'] == true ? tr('成功') : tr('失败'),
+          }),
+        );
       }
-      _snack(tf('插件处理完成：{n} 个，校验通过 {ok}，出图成功 {g}，产物在 orbat_outbox', {
-        'n': files.length,
-        'ok': okCount,
-        'g': renderOk,
-      }));
+      _snack(
+        tf('插件处理完成：{n} 个，校验通过 {ok}，出图成功 {g}，产物在 orbat_outbox', {
+          'n': files.length,
+          'ok': okCount,
+          'g': renderOk,
+        }),
+      );
       await PluginBridge.writeStatus({
         'state': 'idle',
         'lastRun': {
@@ -1062,7 +1170,7 @@ class _HomePageState extends State<HomePage> {
           '-NoProfile',
           '-STA',
           '-Command',
-          r'Set-Clipboard -LiteralPath $env:ORBAT_CLIP'
+          r'Set-Clipboard -LiteralPath $env:ORBAT_CLIP',
         ],
         environment: {'ORBAT_CLIP': src},
       );
@@ -1081,10 +1189,13 @@ class _HomePageState extends State<HomePage> {
   /// 切换「全中文输出」并持久化（默认勾选；不勾选则保留原文称号/番号）
   Future<void> _toggleForceChinese() async {
     setState(
-        () => widget.settings.forceChinese = !widget.settings.forceChinese);
+      () => widget.settings.forceChinese = !widget.settings.forceChinese,
+    );
     await widget.settings.save();
-    AppLogger.instance
-        .info('ui', '全中文输出: ${widget.settings.forceChinese ? "开" : "关（保留原文）"}');
+    AppLogger.instance.info(
+      'ui',
+      '全中文输出: ${widget.settings.forceChinese ? "开" : "关（保留原文）"}',
+    );
   }
 
   /// 打开「输出文件存档」目录（不存在则先创建）
@@ -1150,7 +1261,8 @@ class _HomePageState extends State<HomePage> {
       ..writeln('模型: ${widget.settings.model}')
       ..writeln('API Key: ${AppLogger.keyFingerprint(widget.settings.apiKey)}')
       ..writeln(
-          '当前树: ${tree == null ? "无" : "${tree.count} 节点 / 层级 ${tree.maxDepth}"}')
+        '当前树: ${tree == null ? "无" : "${tree.count} 节点 / 层级 ${tree.maxDepth}"}',
+      )
       ..writeln('最近出图: ${_pngPath ?? "无"}')
       ..writeln('最近SVG: ${_svgPath ?? "无"}');
     await Clipboard.setData(ClipboardData(text: buf.toString()));
@@ -1251,7 +1363,10 @@ class _HomePageState extends State<HomePage> {
               child: SelectableText(
                 text.isEmpty ? '（空）' : text,
                 style: const TextStyle(
-                    fontSize: 12, fontFamily: 'Consolas', height: 1.4),
+                  fontSize: 12,
+                  fontFamily: 'Consolas',
+                  height: 1.4,
+                ),
               ),
             );
 
@@ -1271,17 +1386,22 @@ class _HomePageState extends State<HomePage> {
                   padding: const EdgeInsets.fromLTRB(20, 16, 12, 8),
                   child: Row(
                     children: [
-                      Icon(Icons.chat_bubble_outline,
-                          color: theme.colorScheme.primary),
+                      Icon(
+                        Icons.chat_bubble_outline,
+                        color: theme.colorScheme.primary,
+                      ),
                       const SizedBox(width: 8),
-                      Text(tr('最近一次 API 对话'),
-                          style: theme.textTheme.titleMedium),
+                      Text(
+                        tr('最近一次 API 对话'),
+                        style: theme.textTheme.titleMedium,
+                      ),
                       const SizedBox(width: 12),
                       Text(
                         '${conv['model']} · 入 $inTok / 出 $outTok token · '
                         '${(ms / 1000).toStringAsFixed(1)}s · ${conv['finish']}',
-                        style: theme.textTheme.bodySmall
-                            ?.copyWith(color: theme.hintColor),
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.hintColor,
+                        ),
                       ),
                       const Spacer(),
                       IconButton(
@@ -1326,14 +1446,17 @@ class _HomePageState extends State<HomePage> {
                             children: [
                               if (hasSections) ...[
                                 SingleChildScrollView(
-                                    padding: const EdgeInsets.all(14),
-                                    child: codeBlock(observation)),
+                                  padding: const EdgeInsets.all(14),
+                                  child: codeBlock(observation),
+                                ),
                                 SingleChildScrollView(
-                                    padding: const EdgeInsets.all(14),
-                                    child: codeBlock(jsonPart)),
+                                  padding: const EdgeInsets.all(14),
+                                  child: codeBlock(jsonPart),
+                                ),
                                 SingleChildScrollView(
-                                    padding: const EdgeInsets.all(14),
-                                    child: codeBlock(selfCheck)),
+                                  padding: const EdgeInsets.all(14),
+                                  child: codeBlock(selfCheck),
+                                ),
                               ],
                               SingleChildScrollView(
                                 padding: const EdgeInsets.all(14),
@@ -1347,10 +1470,13 @@ class _HomePageState extends State<HomePage> {
                                         CrossAxisAlignment.start,
                                     children: [
                                       Text(
-                                          tr('模型原生思考链（reasoning_content）：'
-                                              '仅 deepseek-reasoner 等模型会产生；'
-                                              'deepseek-flash 默认关闭，此栏通常为空。'),
-                                          style: TextStyle(fontSize: 11)),
+                                        tr(
+                                          '模型原生思考链（reasoning_content）：'
+                                          '仅 deepseek-reasoner 等模型会产生；'
+                                          'deepseek-flash 默认关闭，此栏通常为空。',
+                                        ),
+                                        style: TextStyle(fontSize: 11),
+                                      ),
                                       const SizedBox(height: 8),
                                       codeBlock(reasoning),
                                     ],
@@ -1363,7 +1489,8 @@ class _HomePageState extends State<HomePage> {
                                   children: [
                                     label('System Prompt'),
                                     codeBlock(
-                                        (conv['system'] ?? '').toString()),
+                                      (conv['system'] ?? '').toString(),
+                                    ),
                                     const SizedBox(height: 12),
                                     label('User Prompt'),
                                     codeBlock((conv['user'] ?? '').toString()),
@@ -1400,11 +1527,16 @@ class _HomePageState extends State<HomePage> {
               child: Row(
                 children: [
                   SizedBox(
-                      width: 110,
-                      child: Text(k, style: theme.textTheme.bodySmall)),
-                  Text(v,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                          color: color, fontWeight: FontWeight.w600)),
+                    width: 110,
+                    child: Text(k, style: theme.textTheme.bodySmall),
+                  ),
+                  Text(
+                    v,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: color,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ],
               ),
             );
@@ -1422,23 +1554,33 @@ class _HomePageState extends State<HomePage> {
                 row('调用次数', '${summary.todayCalls} 次'),
                 row('输入 token', _fmt(summary.todayIn)),
                 row('输出 token', _fmt(summary.todayOut)),
-                row('合计 token', _fmt(summary.todayTokens),
-                    color: theme.colorScheme.primary),
+                row(
+                  '合计 token',
+                  _fmt(summary.todayTokens),
+                  color: theme.colorScheme.primary,
+                ),
                 const Divider(height: 20),
                 Text(tr('本月'), style: theme.textTheme.titleSmall),
                 const SizedBox(height: 4),
                 row('调用次数', '${summary.monthCalls} 次'),
-                row('合计 token', _fmt(summary.monthTokens),
-                    color: theme.colorScheme.primary),
+                row(
+                  '合计 token',
+                  _fmt(summary.monthTokens),
+                  color: theme.colorScheme.primary,
+                ),
                 const Divider(height: 20),
-                Text('最近 ${recent.length} 次调用',
-                    style: theme.textTheme.titleSmall),
+                Text(
+                  '最近 ${recent.length} 次调用',
+                  style: theme.textTheme.titleSmall,
+                ),
                 const SizedBox(height: 6),
                 Expanded(
                   child: recent.isEmpty
                       ? Center(
-                          child: Text(tr('还没有调用记录'),
-                              style: TextStyle(color: theme.hintColor)),
+                          child: Text(
+                            tr('还没有调用记录'),
+                            style: TextStyle(color: theme.hintColor),
+                          ),
                         )
                       : ListView.builder(
                           itemCount: recent.length,
@@ -1454,23 +1596,29 @@ class _HomePageState extends State<HomePage> {
                               child: Row(
                                 children: [
                                   SizedBox(
-                                      width: 88,
-                                      child: Text(ts,
-                                          style:
-                                              const TextStyle(fontSize: 11))),
+                                    width: 88,
+                                    child: Text(
+                                      ts,
+                                      style: const TextStyle(fontSize: 11),
+                                    ),
+                                  ),
                                   SizedBox(
-                                      width: 72,
-                                      child: Text(e.scene,
-                                          style:
-                                              const TextStyle(fontSize: 11))),
+                                    width: 72,
+                                    child: Text(
+                                      e.scene,
+                                      style: const TextStyle(fontSize: 11),
+                                    ),
+                                  ),
                                   Expanded(
                                     child: Text(
                                       'in ${_fmt(e.promptTokens)} / out ${_fmt(e.completionTokens)}',
                                       style: const TextStyle(fontSize: 11),
                                     ),
                                   ),
-                                  Text('${(e.ms / 1000).toStringAsFixed(1)}s',
-                                      style: const TextStyle(fontSize: 11)),
+                                  Text(
+                                    '${(e.ms / 1000).toStringAsFixed(1)}s',
+                                    style: const TextStyle(fontSize: 11),
+                                  ),
                                 ],
                               ),
                             );
@@ -1490,11 +1638,13 @@ class _HomePageState extends State<HomePage> {
                     content: Text(tr('会删除本机保存的全部用量记录，不可恢复。')),
                     actions: [
                       TextButton(
-                          onPressed: () => Navigator.pop(c2, false),
-                          child: Text(tr('取消'))),
+                        onPressed: () => Navigator.pop(c2, false),
+                        child: Text(tr('取消')),
+                      ),
                       FilledButton(
-                          onPressed: () => Navigator.pop(c2, true),
-                          child: Text(tr('清空'))),
+                        onPressed: () => Navigator.pop(c2, true),
+                        child: Text(tr('清空')),
+                      ),
                     ],
                   ),
                 );
@@ -1564,9 +1714,11 @@ class _HomePageState extends State<HomePage> {
                 size: 22,
               ),
               const SizedBox(width: 8),
-              Text(result.allOk
-                  ? tr('环境正常')
-                  : tf('发现 {n} 项问题', {'n': result.failCount})),
+              Text(
+                result.allOk
+                    ? tr('环境正常')
+                    : tf('发现 {n} 项问题', {'n': result.failCount}),
+              ),
             ],
           ),
           content: SizedBox(
@@ -1591,20 +1743,31 @@ class _HomePageState extends State<HomePage> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(i.name,
-                                style: const TextStyle(
-                                    fontSize: 13, fontWeight: FontWeight.w600)),
+                            Text(
+                              i.name,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                             const SizedBox(height: 1),
-                            Text(i.detail,
-                                style: TextStyle(
-                                    fontSize: 11, color: theme.hintColor)),
+                            Text(
+                              i.detail,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: theme.hintColor,
+                              ),
+                            ),
                             if (i.fix != null)
                               Padding(
                                 padding: const EdgeInsets.only(top: 2),
-                                child: Text('→ ${i.fix}',
-                                    style: TextStyle(
-                                        fontSize: 11,
-                                        color: theme.colorScheme.primary)),
+                                child: Text(
+                                  '→ ${i.fix}',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: theme.colorScheme.primary,
+                                  ),
+                                ),
                               ),
                           ],
                         ),
@@ -1628,14 +1791,15 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _openSettings() async {
     final keyCtrl = TextEditingController(text: widget.settings.apiKey);
-    final scriptCtrl =
-        TextEditingController(text: widget.settings.renderScriptPath);
+    final scriptCtrl = TextEditingController(
+      text: widget.settings.renderScriptPath,
+    );
     final modelCtrl = TextEditingController(text: widget.settings.model);
     int modeVal = widget.settings.mode;
     const modeNames = [
       '模式一 · 纯软件',
       '模式二 · 软件+CLI(配API)',
-      '模式三 · Agent插件(无需API)'
+      '模式三 · Agent插件(无需API)',
     ];
 
     await showDialog<void>(
@@ -1654,195 +1818,210 @@ class _HomePageState extends State<HomePage> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                DropdownButtonFormField<int>(
-                  initialValue: modeVal,
-                  isExpanded: true, // 手机窄屏：长选项文本右溢 45px → 占满行宽+省略
-                  decoration: InputDecoration(
-                    labelText: tr('工作模式'),
-                    helperText: tr(
-                        '模式一：GUI 手动使用｜模式二：CLI 交给 Agent，软件配 API｜模式三：Agent 全权，软件不配 API'),
-                    helperMaxLines: 3,
-                    border: OutlineInputBorder(),
-                  ),
-                  items: [
-                    for (var i = 0; i < modeNames.length; i++)
-                      DropdownMenuItem(
-                        value: i,
-                        // 安卓端暂不支持模式二（无 CLI）
-                        enabled: !(Platform.isAndroid && i == 1),
-                        child: Text(
-                          (Platform.isAndroid && i == 1)
-                              ? '${modeNames[i]}（安卓暂不支持）'
-                              : modeNames[i],
-                          style: (Platform.isAndroid && i == 1)
-                              ? TextStyle(color: Theme.of(ctx).hintColor)
-                              : null,
-                        ),
-                      ),
-                  ],
-                  onChanged: (v) {
-                    if (v == null) return;
-                    // 安卓端不允许选模式二
-                    if (Platform.isAndroid && v == 1) return;
-                    setDlgState(() => modeVal = v);
-                  },
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: keyCtrl,
-                  obscureText: true,
-                  // 模式三（Agent 全权）不需要软件 API：灰化且禁止编辑
-                  enabled: modeVal != 2,
-                  decoration: InputDecoration(
-                    labelText: 'DeepSeek API Key',
-                    hintText: 'sk-...',
-                    helperText: tr(modeVal == 2
-                        ? '模式三由 AI Agent 调用自己的 API，本软件不需要 Key'
-                        : '仅存于本机配置文件（DPAPI / 混淆存储）'),
-                    helperMaxLines: 3,
-                    border: const OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                DropdownButtonFormField<String>(
-                  initialValue:
-                      SettingsStore.knownModels.containsKey(modelCtrl.text)
-                          ? modelCtrl.text
-                          : null,
-                  isExpanded: true,
-                  // 模式三灰化：模型由 Agent 决定，软件不调 API
-                  disabledHint: Text(tr('模式三由 Agent 决定模型')),
-                  decoration: InputDecoration(
-                    labelText: tr('识图模型'),
-                    helperText: tr(modeVal == 2
-                        ? '模式三不使用本软件的识图模型'
-                        : '任选预设，也可在下方手填自定义模型 id'),
-                    helperMaxLines: 3,
-                    border: const OutlineInputBorder(),
-                  ),
-                  items: [
-                    ...SettingsStore.knownModels.entries.map(
-                      (e) =>
-                          DropdownMenuItem(value: e.key, child: Text(e.value)),
-                    ),
-                    DropdownMenuItem(
-                        value: '__custom__', child: Text(tr('自定义…'))),
-                  ],
-                  onChanged: modeVal == 2
-                      ? null
-                      : (v) {
-                          if (v == null) return;
-                          if (v == '__custom__') {
-                            modelCtrl.clear();
-                          } else {
-                            modelCtrl.text = v;
-                          }
-                          setDlgState(() {});
-                        },
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: modelCtrl,
-                  enabled: modeVal != 2,
-                  decoration: InputDecoration(
-                    labelText: tr('模型 id（可手填）'),
-                    hintText: 'deepseek-flash',
-                    helperText: modeVal == 2 ? tr('模式三不使用本软件的识图模型') : null,
-                    border: const OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                DropdownButtonFormField<String>(
-                  initialValue: widget.settings.language.isEmpty
-                      ? 'auto'
-                      : widget.settings.language,
-                  isExpanded: true,
-                  decoration: InputDecoration(
-                    labelText: '界面语言 / Language',
-                    border: OutlineInputBorder(),
-                  ),
-                  items: const [
-                    DropdownMenuItem(
-                        value: 'auto', child: Text('跟随系统 / System')),
-                    DropdownMenuItem(value: 'zh', child: Text('中文')),
-                    DropdownMenuItem(value: 'en', child: Text('English')),
-                  ],
-                  onChanged: (v) async {
-                    widget.settings.language =
-                        (v == null || v == 'auto') ? '' : v;
-                    applyLanguage(widget.settings.language);
-                    await widget.settings.save();
-                    setDlgState(() {});
-                  },
-                ),
-                const SizedBox(height: 8),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: OutlinedButton.icon(
-                    onPressed: () => showTutorialDialog(ctx),
-                    icon: const Icon(Icons.menu_book_outlined, size: 16),
-                    label: Text(tr('查看内置教程（纯文字）')),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                // 渲染脚本与 node 说明仅桌面有意义；安卓走 WebView 渲染，隐藏以省高度
-                if (!Platform.isAndroid) ...[
-                  TextField(
-                    controller: scriptCtrl,
+                  DropdownButtonFormField<int>(
+                    initialValue: modeVal,
+                    isExpanded: true, // 手机窄屏：长选项文本右溢 45px → 占满行宽+省略
                     decoration: InputDecoration(
-                      labelText: tr('渲染脚本 render_orbat.js'),
-                      helperText: tr('出图用的线上渲染脚本绝对路径'),
-                      helperMaxLines: 2,
+                      labelText: tr('工作模式'),
+                      helperText: tr(
+                        '模式一：GUI 手动使用｜模式二：CLI 交给 Agent，软件配 API｜模式三：Agent 全权，软件不配 API',
+                      ),
+                      helperMaxLines: 3,
                       border: OutlineInputBorder(),
+                    ),
+                    items: [
+                      for (var i = 0; i < modeNames.length; i++)
+                        DropdownMenuItem(
+                          value: i,
+                          // 安卓端暂不支持模式二（无 CLI）
+                          enabled: !(Platform.isAndroid && i == 1),
+                          child: Text(
+                            (Platform.isAndroid && i == 1)
+                                ? '${modeNames[i]}（安卓暂不支持）'
+                                : modeNames[i],
+                            style: (Platform.isAndroid && i == 1)
+                                ? TextStyle(color: Theme.of(ctx).hintColor)
+                                : null,
+                          ),
+                        ),
+                    ],
+                    onChanged: (v) {
+                      if (v == null) return;
+                      // 安卓端不允许选模式二
+                      if (Platform.isAndroid && v == 1) return;
+                      setDlgState(() => modeVal = v);
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: keyCtrl,
+                    obscureText: true,
+                    // 模式三（Agent 全权）不需要软件 API：灰化且禁止编辑
+                    enabled: modeVal != 2,
+                    decoration: InputDecoration(
+                      labelText: 'DeepSeek API Key',
+                      hintText: 'sk-...',
+                      helperText: tr(
+                        modeVal == 2
+                            ? '模式三由 AI Agent 调用自己的 API，本软件不需要 Key'
+                            : '仅存于本机配置文件（DPAPI / 混淆存储）',
+                      ),
+                      helperMaxLines: 3,
+                      border: const OutlineInputBorder(),
                     ),
                   ),
                   const SizedBox(height: 12),
-                  Text(
-                    tr('说明：出图必须联网，调用 spatialillusions.com 线上渲染器。\n'
-                        '需要 node ≥ 24，脚本会自行探测。'),
-                    style: TextStyle(fontSize: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue:
+                        SettingsStore.knownModels.containsKey(modelCtrl.text)
+                            ? modelCtrl.text
+                            : null,
+                    isExpanded: true,
+                    // 模式三灰化：模型由 Agent 决定，软件不调 API
+                    disabledHint: Text(tr('模式三由 Agent 决定模型')),
+                    decoration: InputDecoration(
+                      labelText: tr('识图模型'),
+                      helperText: tr(
+                        modeVal == 2
+                            ? '模式三不使用本软件的识图模型'
+                            : '任选预设，也可在下方手填自定义模型 id',
+                      ),
+                      helperMaxLines: 3,
+                      border: const OutlineInputBorder(),
+                    ),
+                    items: [
+                      ...SettingsStore.knownModels.entries.map(
+                        (e) => DropdownMenuItem(
+                          value: e.key,
+                          child: Text(e.value),
+                        ),
+                      ),
+                      DropdownMenuItem(
+                        value: '__custom__',
+                        child: Text(tr('自定义…')),
+                      ),
+                    ],
+                    onChanged: modeVal == 2
+                        ? null
+                        : (v) {
+                            if (v == null) return;
+                            if (v == '__custom__') {
+                              modelCtrl.clear();
+                            } else {
+                              modelCtrl.text = v;
+                            }
+                            setDlgState(() {});
+                          },
                   ),
-                  const Divider(height: 24),
-                ],
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(tr('日志与诊断'),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: modelCtrl,
+                    enabled: modeVal != 2,
+                    decoration: InputDecoration(
+                      labelText: tr('模型 id（可手填）'),
+                      hintText: 'deepseek-flash',
+                      helperText: modeVal == 2 ? tr('模式三不使用本软件的识图模型') : null,
+                      border: const OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: widget.settings.language.isEmpty
+                        ? 'auto'
+                        : widget.settings.language,
+                    isExpanded: true,
+                    decoration: InputDecoration(
+                      labelText: '界面语言 / Language',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'auto',
+                        child: Text('跟随系统 / System'),
+                      ),
+                      DropdownMenuItem(value: 'zh', child: Text('中文')),
+                      DropdownMenuItem(value: 'en', child: Text('English')),
+                    ],
+                    onChanged: (v) async {
+                      widget.settings.language =
+                          (v == null || v == 'auto') ? '' : v;
+                      applyLanguage(widget.settings.language);
+                      await widget.settings.save();
+                      setDlgState(() {});
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: OutlinedButton.icon(
+                      onPressed: () => showTutorialDialog(ctx),
+                      icon: const Icon(Icons.menu_book_outlined, size: 16),
+                      label: Text(tr('查看内置教程（纯文字）')),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  // 渲染脚本与 node 说明仅桌面有意义；安卓走 WebView 渲染，隐藏以省高度
+                  if (!Platform.isAndroid) ...[
+                    TextField(
+                      controller: scriptCtrl,
+                      decoration: InputDecoration(
+                        labelText: tr('渲染脚本 render_orbat.js'),
+                        helperText: tr('出图用的线上渲染脚本绝对路径'),
+                        helperMaxLines: 2,
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      tr(
+                        '说明：出图必须联网，调用 spatialillusions.com 线上渲染器。\n'
+                        '需要 node ≥ 24，脚本会自行探测。',
+                      ),
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    const Divider(height: 24),
+                  ],
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      tr('日志与诊断'),
                       style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.bold,
                         color: Theme.of(context).colorScheme.primary,
-                      )),
-                ),
-                const SizedBox(height: 4),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: SelectableText(
-                    AppLogger.instance.logDirPath ?? '（日志未启用：目录不可写）',
-                    style: const TextStyle(fontSize: 11),
+                      ),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 4,
-                  children: [
-                    OutlinedButton.icon(
-                      onPressed: _openLogDir,
-                      icon: const Icon(Icons.folder_open, size: 16),
-                      label: Text(tr('打开日志目录')),
+                  const SizedBox(height: 4),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: SelectableText(
+                      AppLogger.instance.logDirPath ?? '（日志未启用：目录不可写）',
+                      style: const TextStyle(fontSize: 11),
                     ),
-                    OutlinedButton.icon(
-                      onPressed: _exportLog,
-                      icon: const Icon(Icons.save_alt, size: 16),
-                      label: Text(tr('导出本次日志')),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: _copyDiagnostics,
-                      icon: const Icon(Icons.copy_all, size: 16),
-                      label: Text(tr('复制诊断信息')),
-                    ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: _openLogDir,
+                        icon: const Icon(Icons.folder_open, size: 16),
+                        label: Text(tr('打开日志目录')),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: _exportLog,
+                        icon: const Icon(Icons.save_alt, size: 16),
+                        label: Text(tr('导出本次日志')),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: _copyDiagnostics,
+                        icon: const Icon(Icons.copy_all, size: 16),
+                        label: Text(tr('复制诊断信息')),
+                      ),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -1910,17 +2089,20 @@ class _HomePageState extends State<HomePage> {
                   child: SegmentedButton<int>(
                     segments: [
                       ButtonSegment(
-                          value: 0,
-                          icon: Icon(Icons.edit_note_outlined, size: 16),
-                          label: Text(tr('资料'))),
+                        value: 0,
+                        icon: Icon(Icons.edit_note_outlined, size: 16),
+                        label: Text(tr('资料')),
+                      ),
                       ButtonSegment(
-                          value: 1,
-                          icon: Icon(Icons.account_tree_outlined, size: 16),
-                          label: Text(tr('编制树'))),
+                        value: 1,
+                        icon: Icon(Icons.account_tree_outlined, size: 16),
+                        label: Text(tr('编制树')),
+                      ),
                       ButtonSegment(
-                          value: 2,
-                          icon: Icon(Icons.image_outlined, size: 16),
-                          label: Text(tr('预览'))),
+                        value: 2,
+                        icon: Icon(Icons.image_outlined, size: 16),
+                        label: Text(tr('预览')),
+                      ),
                     ],
                     selected: {_mobilePane},
                     onSelectionChanged: (s) =>
@@ -2067,79 +2249,87 @@ class _HomePageState extends State<HomePage> {
           },
           itemBuilder: (_) => [
             PopupMenuItem(
-                value: 'plugin',
-                child: ListTile(
-                  leading: Icon(Icons.extension_outlined, size: 20),
-                  title: Text(tr('插件处理 · Agent 交接'),
-                      style: TextStyle(fontSize: 14)),
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                )),
+              value: 'plugin',
+              child: ListTile(
+                leading: Icon(Icons.extension_outlined, size: 20),
+                title:
+                    Text(tr('插件处理 · Agent 交接'), style: TextStyle(fontSize: 14)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+            ),
             PopupMenuItem(
-                value: 'prompts',
-                child: ListTile(
-                  leading: Icon(Icons.description_outlined, size: 20),
-                  title: Text(tr('导出 Agent 提示词'),
-                      style: TextStyle(fontSize: 14)),
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                )),
+              value: 'prompts',
+              child: ListTile(
+                leading: Icon(Icons.description_outlined, size: 20),
+                title: Text(tr('导出 Agent 提示词'), style: TextStyle(fontSize: 14)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+            ),
             PopupMenuItem(
-                value: 'image',
-                child: ListTile(
-                  leading: Icon(Icons.image_outlined, size: 20),
-                  title: Text(tr('选择图片'), style: TextStyle(fontSize: 14)),
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                )),
+              value: 'image',
+              child: ListTile(
+                leading: Icon(Icons.image_outlined, size: 20),
+                title: Text(tr('选择图片'), style: TextStyle(fontSize: 14)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+            ),
             PopupMenuItem(
-                value: 'json',
-                child: ListTile(
-                  leading: Icon(Icons.folder_open_outlined, size: 20),
-                  title: Text(tr('打开编制 JSON'), style: TextStyle(fontSize: 14)),
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                )),
+              value: 'json',
+              child: ListTile(
+                leading: Icon(Icons.folder_open_outlined, size: 20),
+                title: Text(tr('打开编制 JSON'), style: TextStyle(fontSize: 14)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+            ),
             PopupMenuItem(
-                value: 'usage',
-                child: ListTile(
-                  leading: Icon(Icons.data_usage_outlined, size: 20),
-                  title: Text(tr('API 用量'), style: TextStyle(fontSize: 14)),
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                )),
+              value: 'usage',
+              child: ListTile(
+                leading: Icon(Icons.data_usage_outlined, size: 20),
+                title: Text(tr('API 用量'), style: TextStyle(fontSize: 14)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+            ),
             PopupMenuItem(
-                value: 'conv',
-                child: ListTile(
-                  leading: Icon(Icons.chat_bubble_outline, size: 20),
-                  title: Text(tr('API 对话'), style: TextStyle(fontSize: 14)),
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                )),
+              value: 'conv',
+              child: ListTile(
+                leading: Icon(Icons.chat_bubble_outline, size: 20),
+                title: Text(tr('API 对话'), style: TextStyle(fontSize: 14)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+            ),
             PopupMenuItem(
-                value: 'tutorial',
-                child: ListTile(
-                  leading: Icon(Icons.menu_book_outlined, size: 20),
-                  title: Text(tr('教程'), style: TextStyle(fontSize: 14)),
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                )),
+              value: 'tutorial',
+              child: ListTile(
+                leading: Icon(Icons.menu_book_outlined, size: 20),
+                title: Text(tr('教程'), style: TextStyle(fontSize: 14)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+            ),
             PopupMenuItem(
-                value: 'check',
-                child: ListTile(
-                  leading: Icon(Icons.health_and_safety_outlined, size: 20),
-                  title: Text(tr('环境自检'), style: TextStyle(fontSize: 14)),
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                )),
+              value: 'check',
+              child: ListTile(
+                leading: Icon(Icons.health_and_safety_outlined, size: 20),
+                title: Text(tr('环境自检'), style: TextStyle(fontSize: 14)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+            ),
             PopupMenuItem(
-                value: 'reset',
-                child: ListTile(
-                  leading: Icon(Icons.refresh, size: 20),
-                  title: Text(tr('重置'), style: TextStyle(fontSize: 14)),
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                )),
+              value: 'reset',
+              child: ListTile(
+                leading: Icon(Icons.refresh, size: 20),
+                title: Text(tr('重置'), style: TextStyle(fontSize: 14)),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+            ),
           ],
         ),
         IconButton(
@@ -2194,8 +2384,9 @@ class _HomePageState extends State<HomePage> {
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(10),
                   border: Border.all(color: theme.dividerColor),
-                  color: theme.colorScheme.surfaceContainerHighest
-                      .withValues(alpha: 0.3),
+                  color: theme.colorScheme.surfaceContainerHighest.withValues(
+                    alpha: 0.3,
+                  ),
                 ),
                 clipBehavior: Clip.antiAlias,
                 child: _image == null
@@ -2203,15 +2394,24 @@ class _HomePageState extends State<HomePage> {
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Icon(Icons.add_photo_alternate_outlined,
-                                size: 34, color: theme.hintColor),
+                            Icon(
+                              Icons.add_photo_alternate_outlined,
+                              size: 34,
+                              color: theme.hintColor,
+                            ),
                             const SizedBox(height: 8),
-                            Text(tr('点击选择编制图'),
-                                style: TextStyle(color: theme.hintColor)),
+                            Text(
+                              tr('点击选择编制图'),
+                              style: TextStyle(color: theme.hintColor),
+                            ),
                             const SizedBox(height: 4),
-                            Text('PNG / JPG',
-                                style: TextStyle(
-                                    fontSize: 11, color: theme.hintColor)),
+                            Text(
+                              'PNG / JPG',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: theme.hintColor,
+                              ),
+                            ),
                           ],
                         ),
                       )
@@ -2245,15 +2445,20 @@ class _HomePageState extends State<HomePage> {
           Row(
             children: [
               Text(
-                  _inputMode == InputMode.material
-                      ? tr('补充说明（可选）')
-                      : tr('编制资料（纯文本）'),
-                  style: theme.textTheme.bodySmall),
+                _inputMode == InputMode.material
+                    ? tr('补充说明（可选）')
+                    : tr('编制资料（纯文本）'),
+                style: theme.textTheme.bodySmall,
+              ),
               if (_inputMode == InputMode.textOnly) ...[
                 const SizedBox(width: 6),
-                Text(tr('（直接粘贴或手打单位清单）'),
-                    style: theme.textTheme.bodySmall
-                        ?.copyWith(color: theme.hintColor, fontSize: 11)),
+                Text(
+                  tr('（直接粘贴或手打单位清单）'),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.hintColor,
+                    fontSize: 11,
+                  ),
+                ),
               ],
             ],
           ),
@@ -2267,18 +2472,22 @@ class _HomePageState extends State<HomePage> {
               textAlignVertical: TextAlignVertical.top,
               decoration: InputDecoration(
                 hintText: _inputMode == InputMode.material
-                    ? tr('可补充：编制年代、番号体系、需要保留的原文缩写等。\n'
+                    ? tr(
+                        '可补充：编制年代、番号体系、需要保留的原文缩写等。\n'
                         '大图也可以给结构提示：\n'
                         '总根：第1近卫机械化师\n'
-                        '下辖：师部、第453机械化旅、第51机械化旅')
-                    : tr('粘贴文字资料，例如：\n'
+                        '下辖：师部、第453机械化旅、第51机械化旅',
+                      )
+                    : tr(
+                        '粘贴文字资料，例如：\n'
                         '第1步兵团（空中机动战斗团）\n'
                         '- 指挥与勤务连\n'
                         '  - 情报科\n'
                         '  - 通信排\n'
                         '- 轻型侦察连\n'
                         '……\n\n'
-                        '每行一个单位，用缩进表示层级即可。'),
+                        '每行一个单位，用缩进表示层级即可。',
+                      ),
                 border: const OutlineInputBorder(),
                 contentPadding: const EdgeInsets.all(10),
               ),
@@ -2289,16 +2498,19 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(height: 10),
             Text(
               tr('提示：模型偏好中文单位名；外文资料可在补充说明里要求保留原始缩写。'),
-              style:
-                  theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.hintColor,
+              ),
             ),
           ],
           const SizedBox(height: 6),
           // 全中文输出开关（默认勾选）：决定 JSON 里是中文译名还是原文称号
           Tooltip(
-            message: tr(widget.settings.forceChinese
-                ? '勾选：名称与注释输出中文（外文单位译名）'
-                : '未勾选：名称保留原文称号/番号，注释保留原文，便于与原图对照'),
+            message: tr(
+              widget.settings.forceChinese
+                  ? '勾选：名称与注释输出中文（外文单位译名）'
+                  : '未勾选：名称保留原文称号/番号，注释保留原文，便于与原图对照',
+            ),
             child: InkWell(
               onTap: _busy ? null : _toggleForceChinese,
               borderRadius: BorderRadius.circular(6),
@@ -2320,8 +2532,9 @@ class _HomePageState extends State<HomePage> {
                     Expanded(
                       child: Text(
                         tr('全中文输出（名称与注释译成中文）'),
-                        style:
-                            theme.textTheme.bodySmall?.copyWith(fontSize: 12),
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          fontSize: 12,
+                        ),
                       ),
                     ),
                   ],
@@ -2347,42 +2560,44 @@ class _HomePageState extends State<HomePage> {
             ),
             // 手机窄屏：固定 240 宽 TabBar + 两个文字按钮会右溢 13px →
             // TabBar 收缩 + 按钮收图标
-            child: LayoutBuilder(builder: (context, c) {
-              final narrowBar = c.maxWidth < 640;
-              return Row(
-                children: [
-                  Flexible(
-                    child: TabBar(
-                      isScrollable: narrowBar,
-                      labelStyle: TextStyle(fontSize: 13),
-                      labelPadding: narrowBar
-                          ? const EdgeInsets.symmetric(horizontal: 10)
-                          : EdgeInsets.zero,
-                      tabs: [
-                        Tab(height: 38, text: tr('结构')),
-                        Tab(height: 38, text: tr('JSON 编辑')),
-                        Tab(height: 38, text: tr('批量')),
-                      ],
+            child: LayoutBuilder(
+              builder: (context, c) {
+                final narrowBar = c.maxWidth < 640;
+                return Row(
+                  children: [
+                    Flexible(
+                      child: TabBar(
+                        isScrollable: narrowBar,
+                        labelStyle: TextStyle(fontSize: 13),
+                        labelPadding: narrowBar
+                            ? const EdgeInsets.symmetric(horizontal: 10)
+                            : EdgeInsets.zero,
+                        tabs: [
+                          Tab(height: 38, text: tr('结构')),
+                          Tab(height: 38, text: tr('JSON 编辑')),
+                          Tab(height: 38, text: tr('批量')),
+                        ],
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  if (_report != null) _reportChip(theme, _report!),
-                  const Spacer(),
-                  IconButton(
-                    tooltip: tr('校验当前 JSON'),
-                    onPressed: _jsonText.isEmpty ? null : _validateEditedJson,
-                    visualDensity: VisualDensity.compact,
-                    icon: const Icon(Icons.rule_outlined, size: 18),
-                  ),
-                  IconButton(
-                    tooltip: tr('导出编制 JSON'),
-                    onPressed: _jsonText.isEmpty ? null : _exportJson,
-                    visualDensity: VisualDensity.compact,
-                    icon: const Icon(Icons.download_outlined, size: 18),
-                  ),
-                ],
-              );
-            }),
+                    const SizedBox(width: 8),
+                    if (_report != null) _reportChip(theme, _report!),
+                    const Spacer(),
+                    IconButton(
+                      tooltip: tr('校验当前 JSON'),
+                      onPressed: _jsonText.isEmpty ? null : _validateEditedJson,
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.rule_outlined, size: 18),
+                    ),
+                    IconButton(
+                      tooltip: tr('导出编制 JSON'),
+                      onPressed: _jsonText.isEmpty ? null : _exportJson,
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.download_outlined, size: 18),
+                    ),
+                  ],
+                );
+              },
+            ),
           ),
           Expanded(
             child: TabBarView(
@@ -2423,12 +2638,15 @@ class _HomePageState extends State<HomePage> {
     for (final f in result.files) {
       if (f.path == null) continue;
       final name = f.name;
-      added.add(BatchTask(
-        id: '${DateTime.now().microsecondsSinceEpoch}_${added.length}',
-        sourcePath: f.path!,
-        displayName: name,
-        extraText: _textCtrl.text.trim().isEmpty ? null : _textCtrl.text.trim(),
-      ));
+      added.add(
+        BatchTask(
+          id: '${DateTime.now().microsecondsSinceEpoch}_${added.length}',
+          sourcePath: f.path!,
+          displayName: name,
+          extraText:
+              _textCtrl.text.trim().isEmpty ? null : _textCtrl.text.trim(),
+        ),
+      );
     }
     queue.addAll(added);
     if (added.isNotEmpty) {
@@ -2593,8 +2811,10 @@ class _HomePageState extends State<HomePage> {
                 return ListTile(
                   dense: true,
                   leading: Icon(Icons.circle, size: 10, color: colors[it.kind]),
-                  title: Text('${it.label}: ${it.name}',
-                      style: const TextStyle(fontSize: 12)),
+                  title: Text(
+                    '${it.label}: ${it.name}',
+                    style: const TextStyle(fontSize: 12),
+                  ),
                   subtitle: Text(
                     it.oldValue != null && it.newValue != null
                         ? '${it.oldValue} → ${it.newValue}'
@@ -2652,8 +2872,9 @@ class _HomePageState extends State<HomePage> {
               const Spacer(),
               if (queue != null && tasks.isNotEmpty)
                 Text(
-                    '${queue.doneCount}/${tasks.length} 完成 · 失败 ${queue.failedCount}',
-                    style: theme.textTheme.bodySmall),
+                  '${queue.doneCount}/${tasks.length} 完成 · 失败 ${queue.failedCount}',
+                  style: theme.textTheme.bodySmall,
+                ),
               if (_lastDiff != null) ...[
                 const SizedBox(width: 8),
                 TextButton.icon(
@@ -2680,11 +2901,13 @@ class _HomePageState extends State<HomePage> {
           Expanded(
             child: _emptyHint(
               theme,
-              tr('批量识图 + 自动出图\n\n'
-                  '点「添加图片」一次选多张，程序会串行处理：\n'
-                  '· 每张自动生成 JSON + PNG + SVG，存到图片同目录\n'
-                  '· 失败的可单独重试，不影响其他任务\n'
-                  '· 点击已完成的结果可载入到左侧，再点「对比」看差异'),
+              tr(
+                '批量识图 + 自动出图\n\n'
+                '点「添加图片」一次选多张，程序会串行处理：\n'
+                '· 每张自动生成 JSON + PNG + SVG，存到图片同目录\n'
+                '· 失败的可单独重试，不影响其他任务\n'
+                '· 点击已完成的结果可载入到左侧，再点「对比」看差异',
+              ),
             ),
           )
         else
@@ -2713,8 +2936,10 @@ class _HomePageState extends State<HomePage> {
                   BatchStatus.skipped => '跳过',
                 };
                 return Card(
-                  margin:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  margin: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
                   child: ListTile(
                     dense: true,
                     leading: CircleAvatar(
@@ -2730,8 +2955,10 @@ class _HomePageState extends State<HomePage> {
                         color: color,
                       ),
                     ),
-                    title: Text(t.displayName,
-                        style: const TextStyle(fontSize: 13)),
+                    title: Text(
+                      t.displayName,
+                      style: const TextStyle(fontSize: 13),
+                    ),
                     subtitle: Text(
                       t.error ??
                           '$statusText · ${(t.elapsedMs / 1000).toStringAsFixed(1)}s'
@@ -2831,9 +3058,11 @@ class _HomePageState extends State<HomePage> {
                       final shown = q.isEmpty
                           ? rows
                           : rows
-                              .where((r) => r.node.uniqueDesignation
-                                  .toLowerCase()
-                                  .contains(q))
+                              .where(
+                                (r) => r.node.uniqueDesignation
+                                    .toLowerCase()
+                                    .contains(q),
+                              )
                               .toList();
                       return ListView.builder(
                         itemCount: shown.length,
@@ -2844,17 +3073,20 @@ class _HomePageState extends State<HomePage> {
                                 .pop((node: r.node, path: r.path)),
                             child: Padding(
                               padding: EdgeInsets.only(
-                                  left: 8.0 + r.depth * 14,
-                                  top: 7,
-                                  bottom: 7,
-                                  right: 8),
+                                left: 8.0 + r.depth * 14,
+                                top: 7,
+                                bottom: 7,
+                                right: 8,
+                              ),
                               child: Row(
                                 children: [
                                   Expanded(
                                     child: Text(
-                                      tr(r.node.uniqueDesignation.isEmpty
-                                          ? '(无名)'
-                                          : r.node.uniqueDesignation),
+                                      tr(
+                                        r.node.uniqueDesignation.isEmpty
+                                            ? '(无名)'
+                                            : r.node.uniqueDesignation,
+                                      ),
                                       style: const TextStyle(fontSize: 13),
                                       overflow: TextOverflow.ellipsis,
                                     ),
@@ -2864,8 +3096,9 @@ class _HomePageState extends State<HomePage> {
                                       child: Text(
                                         r.node.additionalInformation,
                                         style: TextStyle(
-                                            fontSize: 11,
-                                            color: Theme.of(ctx3).hintColor),
+                                          fontSize: 11,
+                                          color: Theme.of(ctx3).hintColor,
+                                        ),
                                         overflow: TextOverflow.ellipsis,
                                       ),
                                     ),
@@ -2883,8 +3116,9 @@ class _HomePageState extends State<HomePage> {
           ),
           actions: [
             TextButton(
-                onPressed: () => Navigator.of(ctx).pop(),
-                child: Text(tr('取消'))),
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: Text(tr('取消')),
+            ),
           ],
         );
       },
@@ -2913,11 +3147,14 @@ class _HomePageState extends State<HomePage> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text(path,
-                      style: TextStyle(
-                          fontSize: 11,
-                          color: Theme.of(ctx2).hintColor,
-                          fontFamily: 'Consolas')),
+                  Text(
+                    path,
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Theme.of(ctx2).hintColor,
+                      fontFamily: 'Consolas',
+                    ),
+                  ),
                   const SizedBox(height: 10),
                   TextField(
                     controller: nameCtrl,
@@ -2962,24 +3199,36 @@ class _HomePageState extends State<HomePage> {
             ),
             actions: [
               TextButton(
-                  onPressed: () => Navigator.of(ctx2).pop(false),
-                  child: Text(tr('取消'))),
+                onPressed: () => Navigator.of(ctx2).pop(false),
+                child: Text(tr('取消')),
+              ),
               FilledButton(
-                  onPressed: () => Navigator.of(ctx2).pop(true),
-                  child: Text(tr('保存'))),
+                onPressed: () => Navigator.of(ctx2).pop(true),
+                child: Text(tr('保存')),
+              ),
             ],
           );
         },
       ),
     );
     if (ok != true || !mounted) return;
-    await _applyNodeEdit(path, node, nameCtrl.text.trim(), noteCtrl.text.trim(),
-        sidcCtrl.text.trim());
+    await _applyNodeEdit(
+      path,
+      node,
+      nameCtrl.text.trim(),
+      noteCtrl.text.trim(),
+      sidcCtrl.text.trim(),
+    );
   }
 
   /// 编辑结果作为补丁写回树，并同步 JSON 文本与校验结果
-  Future<void> _applyNodeEdit(String path, OrbatNode original, String name,
-      String note, String sidc) async {
+  Future<void> _applyNodeEdit(
+    String path,
+    OrbatNode original,
+    String name,
+    String note,
+    String sidc,
+  ) async {
     final tree = _tree;
     if (tree == null) return;
     final patch = NodePatch(
@@ -3023,8 +3272,10 @@ class _HomePageState extends State<HomePage> {
               Expanded(
                 child: Text(
                   tr('可以直接改下面的文本；也可以点右侧按单位改名称/注释（会同步回树）'),
-                  style: theme.textTheme.bodySmall
-                      ?.copyWith(fontSize: 11, color: theme.hintColor),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    fontSize: 11,
+                    color: theme.hintColor,
+                  ),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
@@ -3043,7 +3294,10 @@ class _HomePageState extends State<HomePage> {
               expands: true,
               textAlignVertical: TextAlignVertical.top,
               style: const TextStyle(
-                  fontFamily: 'Consolas', fontSize: 12, height: 1.5),
+                fontFamily: 'Consolas',
+                fontSize: 12,
+                height: 1.5,
+              ),
               decoration: InputDecoration(
                 border: const OutlineInputBorder(),
                 contentPadding: const EdgeInsets.all(10),
@@ -3159,7 +3413,10 @@ class _HomePageState extends State<HomePage> {
 
   /// 产物勾选 chip
   Widget _outputChip(
-      String label, bool value, Future<void> Function(bool) onChanged) {
+    String label,
+    bool value,
+    Future<void> Function(bool) onChanged,
+  ) {
     return FilterChip(
       label: Text(label, style: const TextStyle(fontSize: 11)),
       selected: value,
@@ -3193,94 +3450,102 @@ class _HomePageState extends State<HomePage> {
           ),
           // 窄窗口自适应：预览栏被拖窄时，右侧按钮收成图标（Tooltip 保留说明），
           // 否则「导出 PNG / 复制 PNG」会被窗口边缘裁掉。
-          child: LayoutBuilder(builder: (context, constraints) {
-            final compact = constraints.maxWidth < 560;
-            final hideTitle = constraints.maxWidth < 430;
-            // Wrap：手机窄屏放不下时自动换行，桌面宽屏仍是一行（原来 Row 会溢出 29px）
-            return Wrap(
-              spacing: 2,
-              runSpacing: 2,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                if (!hideTitle) ...[
-                  Text(tr('出图成品'), style: theme.textTheme.titleSmall),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 560;
+              final hideTitle = constraints.maxWidth < 430;
+              // Wrap：手机窄屏放不下时自动换行，桌面宽屏仍是一行（原来 Row 会溢出 29px）
+              return Wrap(
+                spacing: 2,
+                runSpacing: 2,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  if (!hideTitle) ...[
+                    Text(tr('出图成品'), style: theme.textTheme.titleSmall),
+                    const SizedBox(width: 8),
+                  ],
+                  // 产物勾选：决定出图时输出哪些文件
+                  _outputChip('JSON', widget.settings.emitJson, (v) async {
+                    setState(() => widget.settings.emitJson = v);
+                    await widget.settings.save();
+                  }),
+                  const SizedBox(width: 2),
+                  _outputChip('PNG', widget.settings.emitPng, (v) async {
+                    setState(() => widget.settings.emitPng = v);
+                    await widget.settings.save();
+                  }),
+                  const SizedBox(width: 2),
+                  _outputChip('SVG', widget.settings.emitSvg, (v) async {
+                    setState(() => widget.settings.emitSvg = v);
+                    await widget.settings.save();
+                  }),
                   const SizedBox(width: 8),
-                ],
-                // 产物勾选：决定出图时输出哪些文件
-                _outputChip('JSON', widget.settings.emitJson, (v) async {
-                  setState(() => widget.settings.emitJson = v);
-                  await widget.settings.save();
-                }),
-                const SizedBox(width: 2),
-                _outputChip('PNG', widget.settings.emitPng, (v) async {
-                  setState(() => widget.settings.emitPng = v);
-                  await widget.settings.save();
-                }),
-                const SizedBox(width: 2),
-                _outputChip('SVG', widget.settings.emitSvg, (v) async {
-                  setState(() => widget.settings.emitSvg = v);
-                  await widget.settings.save();
-                }),
-                const SizedBox(width: 8),
-                // 白色背景开关
-                Tooltip(
-                  message: tr('开=白底 PNG；关=透明底（可叠自定义背景图）'),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(tr('白底'),
-                          style: theme.textTheme.bodySmall?.copyWith(
-                              color: widget.settings.whiteBackground
-                                  ? null
-                                  : theme.hintColor)),
-                      Switch(
-                        value: widget.settings.whiteBackground,
-                        onChanged: _busy
-                            ? null
-                            : (v) async {
-                                setState(
-                                    () => widget.settings.whiteBackground = v);
-                                await widget.settings.save();
-                                AppLogger.instance
-                                    .info('ui', 'PNG 白底开关: ${v ? "开" : "关"}');
-                              },
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 4),
-                if (compact)
-                  IconButton(
-                    tooltip: tr('导出 PNG 到指定位置'),
-                    onPressed: _exportPng,
-                    icon: const Icon(Icons.download_outlined, size: 18),
-                  )
-                else
-                  TextButton.icon(
-                    onPressed: _exportPng,
-                    icon: const Icon(Icons.download_outlined, size: 16),
-                    label: Text(tr('导出 PNG')),
-                  ),
-                const SizedBox(width: 4),
-                // 一键复制：出图后直接把图片放进剪贴板，粘到微信/文档即可
-                if (compact)
-                  IconButton(
-                    tooltip: tr('复制当前 PNG 到剪贴板，可直接粘贴到微信 / Word'),
-                    onPressed: _pngPath == null ? null : _copyPng,
-                    icon: const Icon(Icons.copy_all_outlined, size: 18),
-                  )
-                else
+                  // 白色背景开关
                   Tooltip(
-                    message: tr('把当前 PNG 复制到剪贴板，可直接粘贴到微信 / Word'),
-                    child: TextButton.icon(
-                      onPressed: _pngPath == null ? null : _copyPng,
-                      icon: const Icon(Icons.copy_all_outlined, size: 16),
-                      label: Text(tr('复制 PNG')),
+                    message: tr('开=白底 PNG；关=透明底（可叠自定义背景图）'),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          tr('白底'),
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: widget.settings.whiteBackground
+                                ? null
+                                : theme.hintColor,
+                          ),
+                        ),
+                        Switch(
+                          value: widget.settings.whiteBackground,
+                          onChanged: _busy
+                              ? null
+                              : (v) async {
+                                  setState(
+                                    () => widget.settings.whiteBackground = v,
+                                  );
+                                  await widget.settings.save();
+                                  AppLogger.instance.info(
+                                    'ui',
+                                    'PNG 白底开关: ${v ? "开" : "关"}',
+                                  );
+                                },
+                        ),
+                      ],
                     ),
                   ),
-              ],
-            );
-          }),
+                  const SizedBox(width: 4),
+                  if (compact)
+                    IconButton(
+                      tooltip: tr('导出 PNG 到指定位置'),
+                      onPressed: _exportPng,
+                      icon: const Icon(Icons.download_outlined, size: 18),
+                    )
+                  else
+                    TextButton.icon(
+                      onPressed: _exportPng,
+                      icon: const Icon(Icons.download_outlined, size: 16),
+                      label: Text(tr('导出 PNG')),
+                    ),
+                  const SizedBox(width: 4),
+                  // 一键复制：出图后直接把图片放进剪贴板，粘到微信/文档即可
+                  if (compact)
+                    IconButton(
+                      tooltip: tr('复制当前 PNG 到剪贴板，可直接粘贴到微信 / Word'),
+                      onPressed: _pngPath == null ? null : _copyPng,
+                      icon: const Icon(Icons.copy_all_outlined, size: 18),
+                    )
+                  else
+                    Tooltip(
+                      message: tr('把当前 PNG 复制到剪贴板，可直接粘贴到微信 / Word'),
+                      child: TextButton.icon(
+                        onPressed: _pngPath == null ? null : _copyPng,
+                        icon: const Icon(Icons.copy_all_outlined, size: 16),
+                        label: Text(tr('复制 PNG')),
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
         ),
         // 第二行：当前输出目录 + 更改按钮（让 AI Agent 和用户明确产物位置）
         Container(
@@ -3305,8 +3570,10 @@ class _HomePageState extends State<HomePage> {
                 child: TextButton.icon(
                   onPressed: _openArchiveDir,
                   icon: const Icon(Icons.folder_open_outlined, size: 15),
-                  label:
-                      Text(tr('打开存档目录'), style: const TextStyle(fontSize: 11)),
+                  label: Text(
+                    tr('打开存档目录'),
+                    style: const TextStyle(fontSize: 11),
+                  ),
                 ),
               ),
               TextButton(
@@ -3331,10 +3598,7 @@ class _HomePageState extends State<HomePage> {
                   child: Container(
                     alignment: Alignment.center,
                     padding: const EdgeInsets.all(8),
-                    child: Image.file(
-                      File(_pngPath!),
-                      fit: BoxFit.contain,
-                    ),
+                    child: Image.file(File(_pngPath!), fit: BoxFit.contain),
                   ),
                 ),
         ),
@@ -3352,10 +3616,12 @@ class _HomePageState extends State<HomePage> {
 
     // 实时输出只取最后几行有信息量的
     final recent = _renderLog
-        .where((l) =>
-            !l.startsWith('[warning]') &&
-            !l.contains('Unable to load glyph range') &&
-            !l.startsWith('[pageerror]'))
+        .where(
+          (l) =>
+              !l.startsWith('[warning]') &&
+              !l.contains('Unable to load glyph range') &&
+              !l.startsWith('[pageerror]'),
+        )
         .toList();
     final tail =
         recent.length <= 6 ? recent : recent.sublist(recent.length - 6);
@@ -3411,8 +3677,10 @@ class _HomePageState extends State<HomePage> {
                   tooltip: tr('打开完整日志'),
                   visualDensity: VisualDensity.compact,
                   padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 28, minHeight: 24),
+                  constraints: const BoxConstraints(
+                    minWidth: 28,
+                    minHeight: 24,
+                  ),
                   onPressed: () {
                     _appendLog('完整日志：$_lastRenderLogPath');
                     _snack(tf('完整日志：{p}', {'p': _lastRenderLogPath}));
@@ -3438,8 +3706,9 @@ class _HomePageState extends State<HomePage> {
               width: double.infinity,
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
               decoration: BoxDecoration(
-                color: theme.colorScheme.surfaceContainerHighest
-                    .withValues(alpha: 0.3),
+                color: theme.colorScheme.surfaceContainerHighest.withValues(
+                  alpha: 0.3,
+                ),
                 borderRadius: BorderRadius.circular(5),
               ),
               child: Column(
@@ -3479,8 +3748,9 @@ class _HomePageState extends State<HomePage> {
       height: 130,
       decoration: BoxDecoration(
         border: Border(top: BorderSide(color: theme.dividerColor)),
-        color:
-            theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.15),
+        color: theme.colorScheme.surfaceContainerHighest.withValues(
+          alpha: 0.15,
+        ),
       ),
       child: Column(
         children: [
@@ -3529,36 +3799,38 @@ class _HomePageState extends State<HomePage> {
     return SafeArea(
       top: false,
       child: Container(
-      height: 30,
-      padding: const EdgeInsets.symmetric(horizontal: 14),
-      decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: theme.dividerColor)),
-        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.2),
-      ),
-      child: Row(
-        children: [
-          if (_busy)
-            const Padding(
-              padding: EdgeInsets.only(right: 8),
-              child: SizedBox(
-                width: 10,
-                height: 10,
-                child: CircularProgressIndicator(strokeWidth: 1.5),
+        height: 30,
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        decoration: BoxDecoration(
+          border: Border(top: BorderSide(color: theme.dividerColor)),
+          color: theme.colorScheme.surfaceContainerHighest.withValues(
+            alpha: 0.2,
+          ),
+        ),
+        child: Row(
+          children: [
+            if (_busy)
+              const Padding(
+                padding: EdgeInsets.only(right: 8),
+                child: SizedBox(
+                  width: 10,
+                  height: 10,
+                  child: CircularProgressIndicator(strokeWidth: 1.5),
+                ),
+              ),
+            Expanded(
+              child: Text(
+                _stage,
+                style: TextStyle(fontSize: 11, color: theme.hintColor),
+                overflow: TextOverflow.ellipsis,
               ),
             ),
-          Expanded(
-            child: Text(
-              _stage,
+            Text(
+              tf('模型 {m}', {'m': widget.settings.model}),
               style: TextStyle(fontSize: 11, color: theme.hintColor),
-              overflow: TextOverflow.ellipsis,
             ),
-          ),
-          Text(
-            tf('模型 {m}', {'m': widget.settings.model}),
-            style: TextStyle(fontSize: 11, color: theme.hintColor),
-          ),
-        ],
-      ),
+          ],
+        ),
       ),
     );
   }

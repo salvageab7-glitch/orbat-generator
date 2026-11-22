@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "ORBAT 编制图 Agent 工具",
+    "description": "校验并渲染 ORBAT JSON，提供 PNG 背景、输出目录和工作流自检设置页。按需安全安装固定版本 Node.js 24+，并通过 Chrome 或 Edge 在 spatialillusions.com 渲染。"
+  }
+}

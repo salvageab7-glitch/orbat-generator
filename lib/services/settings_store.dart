@@ -2,9 +2,7 @@
 ///
 /// 带 schema 版本号：配置文件结构变化时能识别并迁移，不丢用户已有设置。
 ///
-/// M1 用「本地文件 + 机器绑定混淆」存放，避免明文躺着。
-/// 注意：混淆不等于加密，只防肉眼直读。后续可无缝换成 Windows DPAPI
-/// （flutter_secure_storage），只需替换本文件实现，UI 不用改。
+/// API Key 使用 Windows DPAPI 或 Android Keystore；旧 XOR 格式仅读取迁移，不再写入。
 library;
 
 import 'dart:convert';
@@ -14,10 +12,8 @@ import '../core/logger.dart';
 import '../core/secret_store.dart';
 
 class SettingsStore {
-  static const _obfuscKey = 'orbat-gen-v1';
-
   /// 配置文件 schema 版本。新增字段/改语义时递增，并在 _migrate 里写迁移逻辑。
-  static const int currentConfigVersion = 6;
+  static const int currentConfigVersion = 7;
 
   /// 已知模型预设（id → 显示名）。可自由填写不在列表里的模型 id。
   static const Map<String, String> knownModels = {
@@ -26,7 +22,16 @@ class SettingsStore {
     'deepseek-reasoner': 'DeepSeek Reasoner（推理强，慢）',
   };
 
-  String apiKey;
+  String _apiKey;
+  bool _apiKeyFromEnvironment = false;
+
+  String get apiKey => _apiKey;
+
+  set apiKey(String value) {
+    _apiKey = value;
+    _apiKeyFromEnvironment = false;
+  }
+
   String model;
   String renderScriptPath;
   String lastDir;
@@ -72,7 +77,7 @@ class SettingsStore {
   int configVersion;
 
   SettingsStore({
-    this.apiKey = '',
+    String apiKey = '',
     this.model = 'deepseek-flash',
     this.renderScriptPath = '',
     this.lastDir = '',
@@ -88,7 +93,7 @@ class SettingsStore {
     this.modeChosen = false,
     this.languageChosen = false,
     this.configVersion = currentConfigVersion,
-  });
+  }) : _apiKey = apiKey;
 
   /// 安卓端配置目录（应用私有 support 目录下 config/）。
   /// main() 启动时由 path_provider 初始化；null = 尚未初始化（退化到回退目录）。
@@ -122,17 +127,23 @@ class SettingsStore {
     // config.json，用 DEEPSEEK_API_KEY 环境变量传 key 最方便，也避免在
     // 共享机器上把 key 写进配置文件。放在 if 外，无配置文件时同样生效。
     final envKey = Platform.environment['DEEPSEEK_API_KEY'] ?? '';
-    if (envKey.trim().isNotEmpty) store.apiKey = envKey.trim();
+    if (envKey.trim().isNotEmpty) {
+      store.apiKey = envKey.trim();
+      store._apiKeyFromEnvironment = true;
+    }
+    var needsConfigRewrite = false;
     try {
       if (await _file.exists()) {
-        final map = jsonDecode(await _file.readAsString()) as Map<String, dynamic>;
+        final map =
+            jsonDecode(await _file.readAsString()) as Map<String, dynamic>;
         // 仅当环境变量没提供 key 时才用配置文件里的
         if (store.apiKey.isEmpty) {
           final raw = (map['apiKey'] ?? '').toString();
-          store.apiKey = SecretStore.open(raw);
-          if (SecretStore.isLegacy(raw)) {
-            // 老格式（固定 XOR）：本次启动内就用明文，保存时自动转 DPAPI
-            AppLogger.instance.info('secret', '检测到旧格式密钥，将在下次保存时转为 DPAPI');
+          store.apiKey = await SecretStore.open(raw);
+          if (raw.isNotEmpty && SecretStore.isLegacy(raw)) {
+            // 老格式（固定 XOR）只为迁移而读取；加载后立即尝试安全重写。
+            needsConfigRewrite = store.apiKey.isNotEmpty;
+            AppLogger.instance.info('secret', '检测到旧格式密钥，将迁移到平台安全存储');
           }
         }
         store.model = (map['model'] ?? 'deepseek-flash').toString();
@@ -164,8 +175,9 @@ class SettingsStore {
         // 这里只更新版本号；以后有破坏性变更时在这里加分支。
         if (store.configVersion < currentConfigVersion) {
           store.configVersion = currentConfigVersion;
-          await store.save();
+          needsConfigRewrite = true;
         }
+        if (needsConfigRewrite) await store.save();
       }
     } catch (e) {
       // 配置损坏就用默认值，不阻塞启动——但必须留痕，否则用户"设置总是不生效"查不出来
@@ -176,25 +188,49 @@ class SettingsStore {
 
   Future<void> save() async {
     try {
+      String storedApiKey;
+      if (_apiKeyFromEnvironment) {
+        // 环境变量优先但不落盘；保存其他设置时保留现存密文。
+        storedApiKey = '';
+        if (await _file.exists()) {
+          try {
+            final current = jsonDecode(await _file.readAsString());
+            if (current is Map<String, dynamic>) {
+              storedApiKey = (current['apiKey'] ?? '').toString();
+            }
+          } catch (_) {}
+        }
+      } else {
+        storedApiKey = await SecretStore.seal(apiKey);
+        if (apiKey.isNotEmpty && storedApiKey.isEmpty) {
+          AppLogger.instance.warn(
+            'secret',
+            'API Key 未能安全加密；本次配置未写入，避免密钥丢失或降级存储',
+          );
+          return;
+        }
+      }
       await configDir.create(recursive: true);
-      await _file.writeAsString(jsonEncode({
-        'apiKey': SecretStore.seal(apiKey),
-        'model': model,
-        'renderScriptPath': renderScriptPath,
-        'lastDir': lastDir,
-        'whiteBackground': whiteBackground,
-        'outputDir': outputDir,
-        'mode': mode,
-        'emitJson': emitJson,
-        'emitPng': emitPng,
-        'emitSvg': emitSvg,
-        'forceChinese': forceChinese,
-        'language': language,
-        'firstRunSelfCheckDone': firstRunSelfCheckDone,
-        'modeChosen': modeChosen,
-        'languageChosen': languageChosen,
-        'configVersion': configVersion,
-      }));
+      await _file.writeAsString(
+        jsonEncode({
+          'apiKey': storedApiKey,
+          'model': model,
+          'renderScriptPath': renderScriptPath,
+          'lastDir': lastDir,
+          'whiteBackground': whiteBackground,
+          'outputDir': outputDir,
+          'mode': mode,
+          'emitJson': emitJson,
+          'emitPng': emitPng,
+          'emitSvg': emitSvg,
+          'forceChinese': forceChinese,
+          'language': language,
+          'firstRunSelfCheckDone': firstRunSelfCheckDone,
+          'modeChosen': modeChosen,
+          'languageChosen': languageChosen,
+          'configVersion': configVersion,
+        }),
+      );
     } catch (e) {
       // 写失败不阻塞使用，但一定要记录：受控环境下 AppData 可能不可写，
       // 表现为"改了设置、重启又变回去"，没有这行日志根本查不出来。

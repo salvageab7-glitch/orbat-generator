@@ -7,16 +7,48 @@
 /// 而校验器报的红牌里，绝大多数是**机械性问题**：
 ///   - SIDC 不是 30 位（多写/少写 0）
 ///   - 名称里有「空格 + 左括号」（渲染器会卡死）
-///   - 注释超过 24 个汉字（图上会溢出）
+///   - 注释超过 12 个汉字 / 20 个字母（图上会溢出）
 /// 这些用字符串规范化就能修，不需要任何语义判断。
 library;
 
 import 'orbat.dart';
 import 'schema_rules.dart';
+import 'sidc_rule.dart';
 
 class OrbatAutoFix {
   /// 对整棵树做机械修复，返回新树（不修改原对象）
   static OrbatNode apply(OrbatNode root) => _fix(root);
+
+  /// 只修“名称层级词与 SIDC 梯队段不一致”，用于渲染前兜底。
+  /// 例如「师部及师部营」名称判为营(16)，SIDC 却给连(15)：照名称修正，
+  /// 避免校验只报 warn、渲染器仍画错图标。其余位一律不动。
+  static OrbatNode fixEchelon(OrbatNode root) => fixEchelonReport(root).tree;
+
+  /// 同 [fixEchelon]，但额外返回实际修正的节点数，供渲染层提示。
+  static ({OrbatNode tree, int fixed}) fixEchelonReport(OrbatNode root) {
+    var fixed = 0;
+    OrbatNode walk(OrbatNode n) {
+      var sidc = n.sidc;
+      final name = n.uniqueDesignation;
+      if (sidc.length == 30 && SidcRule.echelonAtTail(name)) {
+        final guess = SidcRule.guessEchelon(name);
+        final current = sidc.substring(8, 10);
+        if (guess != '00' && guess != current) {
+          sidc = '${sidc.substring(0, 8)}$guess${sidc.substring(10)}';
+          fixed++;
+        }
+      }
+      return OrbatNode(
+        uniqueDesignation: n.uniqueDesignation,
+        additionalInformation: n.additionalInformation,
+        sidc: sidc,
+        commandLevels: n.commandLevels,
+        children: n.children.map(walk).toList(),
+      );
+    }
+
+    return (tree: walk(root), fixed: fixed);
+  }
 
   /// 自检说明黑名单——模型把「看不清」类说明写进了数据字段，
   /// 渲染出来就是「支援单位，符号不清」这种怪注释，必须清掉。
@@ -81,15 +113,13 @@ class OrbatAutoFix {
       // 名称：残缺方让位给完整方。OrbatNode 字段全 final，合并 = 构建新节点。
       final t = out[targetIdx];
       final tTruncated = _truncatedMark.hasMatch(t.uniqueDesignation);
-      final mergedName =
-          tTruncated && !truncated ? name : t.uniqueDesignation;
+      final mergedName = tTruncated && !truncated ? name : t.uniqueDesignation;
       final noteSrc = tTruncated && !truncated ? node : t;
       var note = noteSrc.additionalInformation;
       if (note.trim().isEmpty ||
           note.contains('[?]') ||
           _selfCheckNote.hasMatch(note)) {
-        final other =
-            identical(noteSrc, node) ? t : node;
+        final other = identical(noteSrc, node) ? t : node;
         if (!other.additionalInformation.contains('[?]') &&
             !_selfCheckNote.hasMatch(other.additionalInformation)) {
           note = other.additionalInformation;

@@ -69,7 +69,7 @@ class SidcRule {
   /// 「第2师通信团」必须判成团(17)，按老规则（词表顺序优先师）会判成师(21)，
   /// 于是图画成师级方框、校验器还查不出来。测试用例见 v04_rules_test.dart。
   static String guessEchelon(String name) {
-    final t = name.trim();
+    final t = _effectiveEchelonName(name.trim());
     if (t.isEmpty) return '00';
 
     final base = _echelonFromWords(t);
@@ -100,7 +100,7 @@ class SidcRule {
   /// 反例：「2nd Division Postal Unit」——开头有 Division，但它是**母体名**，
   /// 单位本身是连级；若照 Division 改成师级，会把对的结果改错。
   static bool echelonAtTail(String name) {
-    final t = name.trim();
+    final t = _effectiveEchelonName(name.trim());
     if (t.isEmpty) return false;
     if (t.endsWith('部') || t.contains('司令部') || t.contains('指挥部')) {
       return true;
@@ -122,6 +122,41 @@ class SidcRule {
     // 就改成师级——宁可不动，也不要把对的改错。
     return suffix.isEmpty;
   }
+
+  /// 「第1营·第327步兵团」这类名称：· 前是本单位，· 后是母体番号。
+  /// 若 · 前的层级明显低于 · 后，返回前半段；否则保留全名。
+  /// 这样既能把“第1营·第327步兵团”判成营，又不会把“第101空降师·师部”判错。
+  static String _effectiveEchelonName(String t) {
+    final sep = t.indexOf('·');
+    if (sep <= 0) return t;
+    final head = t.substring(0, sep).trim();
+    final tail = t.substring(sep + 1).trim();
+    if (head.isEmpty || tail.isEmpty) return t;
+    final h = _echelonFromWords(head);
+    final l = _echelonFromWords(tail);
+    final hr = _echelonRank[h];
+    final lr = _echelonRank[l];
+    if (hr == null || lr == null || hr >= lr) return t;
+    return head;
+  }
+
+  /// 层级码秩：数字越大层级越高，用于比较 · 前后两段。
+  static const Map<String, int> _echelonRank = {
+    '11': 1,
+    '12': 2,
+    '13': 3,
+    '14': 4,
+    '15': 5,
+    '16': 6,
+    '17': 7,
+    '18': 8,
+    '21': 9,
+    '22': 10,
+    '23': 11,
+    '24': 12,
+    '25': 13,
+    '26': 14,
+  };
 
   /// 只按"最靠右的层级词"判层级，不处理指挥所
   static String _echelonFromWords(String t) {

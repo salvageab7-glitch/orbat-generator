@@ -23,12 +23,16 @@ DART="/c/flutter/bin/cache/dart-sdk/bin/dart.exe"
 
 echo "[1/5] 同步源码 lib/ -> cli_aot/lib/"
 mkdir -p "$AOT_DIR/lib"
-for item in core ai render services pipeline.dart; do
+for item in core ai render services i18n pipeline.dart; do
   rm -rf "$AOT_DIR/lib/$item"
   cp -r "$APP_DIR/lib/$item" "$AOT_DIR/lib/$item"
 done
 mkdir -p "$AOT_DIR/lib/cli"
 cp "$APP_DIR/lib/cli/main.dart" "$AOT_DIR/lib/cli/main.dart"
+
+# GUI 的 secret_store 依赖 Flutter（Android Keystore）；AOT CLI 用纯 Dart 的
+# Windows DPAPI 版本覆盖，公共签名保持一致。
+cp "$AOT_DIR/stubs/secret_store.dart" "$AOT_DIR/lib/core/secret_store.dart"
 
 # 确认无 Flutter 依赖混入（混入会导致 AOT 编译或运行失败）
 if grep -rq "package:flutter" "$AOT_DIR/lib/"; then
