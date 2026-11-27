@@ -15,6 +15,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../ai/prompt.dart';
+import '../core/logger.dart';
 import '../core/orbat.dart';
 import '../pipeline.dart';
 import '../render/renderer.dart';
@@ -61,19 +62,36 @@ class PluginBridge {
   /// 处理单个 JSON：
   /// 1) 解析 + 7 键归一化 → 2) 校验报告 → 3) 出图（回调注入渲染器）
   /// 4) 产物与报告写 outbox → 5) 源文件移入 done/
+  static String newRunId() {
+    final DateTime d = DateTime.now();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${d.year}${two(d.month)}${two(d.day)}-'
+        '${two(d.hour)}${two(d.minute)}${two(d.second)}-'
+        '${d.millisecond.toString().padLeft(3, '0')}'
+        '${d.microsecond.toString().padLeft(3, '0').substring(0, 3)}';
+  }
+
   static Future<Map<String, dynamic>> processOne(
     File jsonFile,
     Future<RenderResult> Function(String normalizedJson, String outputBase)
-    render,
-  ) async {
+        render, {
+    String? runId,
+    String? commandLevelsOverride,
+  }) async {
+    final String effectiveRunId = runId ?? newRunId();
     final sourceName = jsonFile.path.split(Platform.pathSeparator).last;
     final rawBase = sourceName
         .replaceAll(RegExp(r'\.json$', caseSensitive: false), '')
         .replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1F]'), '_')
         .trim();
     final base = rawBase.isEmpty ? 'input' : rawBase;
+    // 固定目录 + runId 后缀：同名输入不再覆盖历史产物。
+    final artifactBase = '${base}__$effectiveRunId';
     final report = <String, dynamic>{
       'file': base,
+      'runId': effectiveRunId,
+      'artifactBase': artifactBase,
+      'deliverable': false,
       'ok': false,
       'nodeCount': 0,
       'depth': 0,
@@ -119,9 +137,23 @@ class PluginBridge {
       await _archiveSource(jsonFile);
       return report;
     }
-    final normalized = normalizeTreeJson(tree, adaptForRender: true);
+    final String commandLevelsInput = tree.commandLevels.trim();
+    final String? pref =
+        (commandLevelsOverride == '2' || commandLevelsOverride == '3')
+            ? commandLevelsOverride
+            : null;
+    final String commandLevelsOutput =
+        pref ?? (commandLevelsInput == '2' ? '2' : '3');
+    final normalized = normalizeTreeJson(
+      tree,
+      commandLevels: commandLevelsOutput,
+      adaptForRender: true,
+    );
     final parsed = parseTreeJson(normalized)!;
     final validation = OrbatValidator.validate(parsed);
+    report['commandLevelsInput'] = commandLevelsInput;
+    report['commandLevelsOutput'] = commandLevelsOutput;
+    report['commandLevelsSource'] = pref != null ? 'settings' : 'json';
     report['nodeCount'] = _countNodes(parsed);
     report['depth'] = _depth(parsed);
     report['red'] = validation.issues
@@ -133,23 +165,36 @@ class PluginBridge {
         .map((i) => {'path': i.path, 'message': i.message})
         .toList();
     report['ok'] = validation.ok;
-    await File('$outboxDir/$base.normalized.json')
+    await File('$outboxDir/$artifactBase.normalized.json')
         .writeAsString(normalized, flush: true);
 
-    // 出图（红牌也继续渲染——Agent 可以从图+报告综合判断）
-    try {
-      final result = await render(normalized, '$outboxDir/$base');
+    // 红牌阻断出图：与桌面/GUI/CLI 的契约一致，避免把错误编制图当成功产物。
+    if (!validation.ok) {
       report['render'] = {
-        'ok': result.ok,
-        'png': result.pngPath,
-        'svg': result.svgPath,
-        if (!result.ok) 'error': result.error,
+        'ok': false,
+        'skipped': true,
+        'reason': '存在红牌错误，已跳过出图',
       };
-    } catch (e) {
-      report['render'] = {'ok': false, 'error': '$e'};
+    } else {
+      try {
+        final result = await render(normalized, '$outboxDir/$artifactBase');
+        final quality = result.quality;
+        report['render'] = {
+          'ok': result.ok,
+          'png': result.pngPath,
+          'svg': result.svgPath,
+          'quality': quality?.toJson(),
+          if (!result.ok) 'error': result.error,
+        };
+        report['deliverable'] = result.ok && (quality?.ok ?? false);
+      } catch (e) {
+        report['render'] = {'ok': false, 'error': '$e'};
+        report['deliverable'] = false;
+      }
     }
 
-    await _writeReport(base, report);
+    await _writeReport(artifactBase, report);
+    report['reportPath'] = '$outboxDir/$artifactBase.report.json';
     await _archiveSource(jsonFile);
     return report;
   }
@@ -193,6 +238,11 @@ class PluginBridge {
   static Future<String> exportPrompts() async {
     ensureDirs();
     final buf = StringBuffer()
+      ..writeln('# PROMPT_VERSION: $kPromptContractVersion')
+      ..writeln('# COMMENT_LIMIT: 12 CJK / 20 letters')
+      ..writeln('# SIDC_BASE: 0-based')
+      ..writeln('# GENERATED: ${DateTime.now().toIso8601String()}')
+      ..writeln()
       ..writeln('===== 文字/修复（完整 SIDC 规范）=====')
       ..writeln(kOrbatSystemPrompt)
       ..writeln()
@@ -201,6 +251,53 @@ class PluginBridge {
     final path = '$docsDir/agent_prompts.txt';
     await File(path).writeAsString(buf.toString(), flush: true);
     return path;
+  }
+
+  /// 确保 orbat_docs/agent_prompts.txt 是当前契约版本；旧 24 字文件会被重写。
+  static Future<String> ensurePromptsCurrent() async {
+    ensureDirs();
+    final path = '$docsDir/agent_prompts.txt';
+    final file = File(path);
+    try {
+      if (await file.exists()) {
+        final text = await file.readAsString();
+        if (text.contains('# PROMPT_VERSION: $kPromptContractVersion')) {
+          return path;
+        }
+      }
+    } catch (_) {}
+    return exportPrompts();
+  }
+
+  /// 把最近的应用日志尾部写到 outbox，供 Agent 读取失败原因。
+  ///
+  /// 返回 `(path, tail)`；日志不可用时返回 null。尾部限制 80 行/8000 字符。
+  static Future<({String path, String tail})?> writeDiagnostics(
+    String runId, {
+    int maxLines = 80,
+  }) async {
+    try {
+      // 优先用 logger 的内存尾部（含尚未落盘的行），避免刚失败时读到空日志。
+      String tail = AppLogger.instance.readTail(maxLines: maxLines);
+      if (tail.isEmpty) {
+        final String? logPath = AppLogger.instance.currentLogPath;
+        if (logPath == null || logPath.isEmpty) return null;
+        final File logFile = File(logPath);
+        if (!await logFile.exists()) return null;
+        final String text = await logFile.readAsString();
+        final List<String> lines = text.split('\n');
+        final List<String> tailLines = lines.length <= maxLines
+            ? lines
+            : lines.sublist(lines.length - maxLines);
+        tail = tailLines.join('\n').trim();
+      }
+      if (tail.length > 8000) tail = tail.substring(tail.length - 8000);
+      final File out = File('$outboxDir/$runId.log.txt');
+      await out.writeAsString(tail, flush: true);
+      return (path: out.path, tail: tail);
+    } catch (_) {
+      return null;
+    }
   }
 
   static int _countNodes(OrbatNode n) =>

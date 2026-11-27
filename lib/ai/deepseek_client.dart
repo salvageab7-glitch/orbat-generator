@@ -10,10 +10,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import '../core/orbat.dart';
 import '../core/logger.dart';
 import '../core/usage_store.dart';
+import 'api_endpoint.dart' as api;
 
 class DeepSeekConfig {
   final String apiKey;
@@ -26,6 +28,38 @@ class DeepSeekConfig {
   /// 是否关闭思考模式。默认关闭——编制抽取是结构化任务，
   /// 思考过程只会占用输出预算并污染 JSON。
   final bool disableThinking;
+
+  /// OpenCode Go 的稳定会话 ID；为空时使用本进程默认 ID（每次 App 启动一个）。
+  final String? sessionId;
+
+  static final String _processSessionId =
+      'orbat-${DateTime.now().microsecondsSinceEpoch}';
+
+  String get effectiveSessionId {
+    final s = sessionId?.trim();
+    return (s != null && s.isNotEmpty) ? s : _processSessionId;
+  }
+
+  /// 去掉末尾斜杠；空值回退 DeepSeek 默认地址。
+  String get normalizedBaseUrl => api.normalizeApiBaseUrl(baseUrl);
+
+  /// 兼容用户填 `/v1`、完整 `/chat/completions` 或带尾斜杠。
+  String get chatCompletionsUrl => api.chatCompletionsUrl(baseUrl);
+
+  bool get isDeepSeek => api.isDeepSeekHost(baseUrl);
+
+  bool get isOpenCode => api.isOpenCodeHost(baseUrl);
+
+  bool get isOpenCodeGo => api.isOpenCodeGoBase(baseUrl);
+
+  bool get shouldDisableThinking =>
+      disableThinking && (isDeepSeek || isOpenCode);
+
+  String get providerLabel => isOpenCode
+      ? 'OpenCode'
+      : isDeepSeek
+          ? 'DeepSeek'
+          : 'AI';
 
   DeepSeekConfig({
     required this.apiKey,
@@ -43,7 +77,90 @@ class DeepSeekConfig {
     // 注意 timeout 覆盖「建连 + 读完响应体」整体（见 _runWithRetry）。
     this.timeout = const Duration(seconds: 60),
     this.disableThinking = true,
+    this.sessionId,
   });
+}
+
+enum DeepSeekErrorKind {
+  auth,
+  balance,
+  forbidden,
+  badRequest,
+  rateLimit,
+  server,
+  timeout,
+  network,
+  unknown,
+}
+
+DeepSeekErrorKind classifyStatus(int status) {
+  switch (status) {
+    case 400:
+      return DeepSeekErrorKind.badRequest;
+    case 401:
+      return DeepSeekErrorKind.auth;
+    case 402:
+      return DeepSeekErrorKind.balance;
+    case 403:
+      return DeepSeekErrorKind.forbidden;
+    case 408:
+      return DeepSeekErrorKind.timeout;
+    case 429:
+      return DeepSeekErrorKind.rateLimit;
+    default:
+      return status >= 500
+          ? DeepSeekErrorKind.server
+          : DeepSeekErrorKind.unknown;
+  }
+}
+
+bool isPermanentError(DeepSeekErrorKind kind) =>
+    kind == DeepSeekErrorKind.auth ||
+    kind == DeepSeekErrorKind.balance ||
+    kind == DeepSeekErrorKind.forbidden ||
+    kind == DeepSeekErrorKind.badRequest;
+
+/// 解析 `Retry-After`：支持秒数和 HTTP 日期；无法解析返回 null。
+Duration? parseRetryAfter(String? value, {DateTime? now}) {
+  if (value == null || value.trim().isEmpty) return null;
+  final String text = value.trim();
+  final int? seconds = int.tryParse(text);
+  if (seconds != null) {
+    return seconds <= 0 ? Duration.zero : Duration(seconds: seconds);
+  }
+  try {
+    final DateTime date = HttpDate.parse(text);
+    final Duration diff = date.difference(now ?? DateTime.now());
+    return diff.isNegative ? Duration.zero : diff;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// 指数退避 + 抖动：第 1 次约 1s，第 2 次约 3s；有 Retry-After 时优先。
+Duration retryDelayFor(
+  int attempt, {
+  Duration? retryAfter,
+  Random? random,
+}) {
+  if (retryAfter != null) return retryAfter;
+  final int baseMs = attempt <= 1 ? 1000 : 3000;
+  final int jitter = (random ?? Random()).nextInt(250);
+  return Duration(milliseconds: baseMs + jitter);
+}
+
+/// 按图块像素面积计算超时：1MP≈60s，4MP≈90s，7MP+≈120s。
+Duration dynamicTimeoutFor(
+  int pixelCount, {
+  int baseSeconds = 60,
+  int maxSeconds = 120,
+}) {
+  if (pixelCount <= 0) return Duration(seconds: baseSeconds);
+  final double megapixels = pixelCount / 1000000.0;
+  final double extra = max(0.0, megapixels - 1.0) * 10.0;
+  final int seconds =
+      (baseSeconds + extra).clamp(baseSeconds, maxSeconds).round();
+  return Duration(seconds: seconds);
 }
 
 class GenerateResult {
@@ -98,6 +215,7 @@ class DeepSeekClient {
     String? extraText,
     bool jsonMode = true,
     void Function(String phase)? onProgress,
+    Duration? timeout,
   }) async {
     final b64 = base64.encode(imageBytes);
     final userContent = <Map<String, dynamic>>[
@@ -111,6 +229,7 @@ class DeepSeekClient {
       userContent,
       jsonMode: jsonMode,
       onProgress: onProgress,
+      timeout: timeout,
     );
   }
 
@@ -123,6 +242,7 @@ class DeepSeekClient {
     String mimeType = 'image/png',
     required String prompt,
     void Function(String phase)? onProgress,
+    Duration? timeout,
   }) async {
     final b64 = base64.encode(imageBytes);
     final r = await _runWithRetry(
@@ -135,6 +255,7 @@ class DeepSeekClient {
       ],
       jsonMode: false,
       onProgress: onProgress,
+      timeout: timeout,
     );
 
     if (r.error != null && r.rawJson.trim().isEmpty) return null;
@@ -179,16 +300,16 @@ class DeepSeekClient {
       case 400:
         return '请求格式错误（400）。请检查模型和请求配置';
       case 401:
-        return 'API Key 无效或无权限（401）。请在设置里重新填写 DeepSeek Key';
+        return 'API Key 无效或无权限（401）。请在设置里重新填写 ${config.providerLabel} Key';
       case 402:
-        return '账户余额不足（402）。请到 platform.deepseek.com 充值';
+        return '账户余额不足（402）。请到 ${config.providerLabel} 控制台充值';
       case 403:
         return '请求被拒绝（403）。请检查 Key 的权限或所在网络是否被限制';
       case 429:
         return '请求过于频繁（429）。稍等几十秒再试，或减少批量任务数';
       default:
         if (status >= 500) {
-          return 'DeepSeek 服务端异常（$status），稍后重试即可';
+          return '${config.providerLabel} 服务端异常（$status），稍后重试即可';
         }
         return 'HTTP $status，响应正文未记录';
     }
@@ -198,12 +319,21 @@ class DeepSeekClient {
     List<Map<String, dynamic>> userContent, {
     bool jsonMode = true,
     void Function(String phase)? onProgress,
+    Duration? timeout,
   }) async {
+    if (config.model.trim().isEmpty) {
+      return GenerateResult(
+        rawJson: '',
+        attempts: 0,
+        error: '未选择模型：请先在设置里读取模型列表并选择，或手填模型 id。',
+      );
+    }
     String lastRaw = '';
     String? lastError;
+    final Duration effectiveTimeout = timeout ?? config.timeout;
 
     for (var attempt = 1; attempt <= config.maxRetries; attempt++) {
-      onProgress?.call('第 $attempt 次请求 DeepSeek…');
+      onProgress?.call('第 $attempt 次请求 ${config.providerLabel}…');
       try {
         final body = <String, dynamic>{
           'model': config.model,
@@ -215,14 +345,20 @@ class DeepSeekClient {
           'max_tokens': config.maxTokens,
           'temperature': 0.1,
           'stream': false,
-          if (config.disableThinking) 'thinking': {'type': 'disabled'},
+          if (config.shouldDisableThinking) 'thinking': {'type': 'disabled'},
         };
 
         final request = await _http.postUrl(
-          Uri.parse('${config.baseUrl}/chat/completions'),
+          Uri.parse(config.chatCompletionsUrl),
         );
         request.headers.set('Content-Type', 'application/json; charset=utf-8');
         request.headers.set('Authorization', 'Bearer ${config.apiKey}');
+        if (config.isOpenCode) {
+          request.headers.set(
+            'x-opencode-session',
+            config.effectiveSessionId,
+          );
+        }
         // 必须用 utf8 编码字节流：HttpClientRequest.write(String) 默认按 Latin1 编码，
         // 遇到中文会抛 "Contains invalid characters"（system prompt 全是中文，必然踩到）。
         final t0 = DateTime.now();
@@ -232,21 +368,28 @@ class DeepSeekClient {
         // 关键：把「建连 + 读完响应体」整体包进超时。
         // 只给 request.close() 加 timeout 不够——那只覆盖首字节，
         // 模型慢速吐 64000 token 时 join() 会一直等（实测 248 秒没被 180 秒超时拦住）。
-        final resp =
-            await () async {
-              final response = await request.close().timeout(config.timeout);
-              final body = await utf8.decoder.bind(response).join();
-              return (status: response.statusCode, body: body);
-            }().timeout(
-              config.timeout,
-              onTimeout: () {
-                request.abort();
-                throw TimeoutException('AI 响应超时（${config.timeout.inSeconds}秒）');
-              },
+        final resp = await () async {
+          final response = await request.close().timeout(effectiveTimeout);
+          final body = await utf8.decoder.bind(response).join();
+          return (
+            status: response.statusCode,
+            body: body,
+            retryAfter: response.headers.value(HttpHeaders.retryAfterHeader),
+          );
+        }()
+            .timeout(
+          effectiveTimeout,
+          onTimeout: () {
+            request.abort();
+            throw TimeoutException(
+              'AI 响应超时（${effectiveTimeout.inSeconds}秒）',
             );
+          },
+        );
         final respBody = resp.body;
 
         if (resp.status != 200) {
+          final DeepSeekErrorKind kind = classifyStatus(resp.status);
           lastError = _describeHttp(resp.status);
           _logFailure(
             attempt: attempt,
@@ -256,9 +399,20 @@ class DeepSeekClient {
             elapsedMs: DateTime.now().difference(t0).inMilliseconds,
           );
           onProgress?.call('请求失败：$lastError');
-          // 401/402/403 属于"重试也没用"的错误，立刻停止，别让用户白等两轮
-          if (resp.status == 401 || resp.status == 402 || resp.status == 403) {
-            break;
+          // 400/401/402/403 重试无用，立即停止。
+          if (isPermanentError(kind)) break;
+
+          if (attempt < config.maxRetries) {
+            Duration? retryAfter;
+            if (kind == DeepSeekErrorKind.rateLimit) {
+              retryAfter = parseRetryAfter(resp.retryAfter);
+              const Duration cap = Duration(seconds: 30);
+              if (retryAfter != null && retryAfter > cap) retryAfter = cap;
+            }
+            final Duration wait =
+                retryDelayFor(attempt, retryAfter: retryAfter);
+            onProgress?.call('${wait.inSeconds}s 后重试…');
+            await Future<void>.delayed(wait);
           }
           continue;
         }
@@ -301,8 +455,7 @@ class DeepSeekClient {
 
         if (content.trim().isEmpty) {
           if (finishReason == 'length') {
-            lastError =
-                '输出被 max_tokens 截断（finish_reason=length）'
+            lastError = '输出被 max_tokens 截断（finish_reason=length）'
                 '${reasoning.isNotEmpty ? "，且全部消耗在思考过程" : ""}。'
                 '请确认已关闭思考模式，或调大 max_tokens。';
             lastRaw = reasoning.isNotEmpty ? reasoning : content;
@@ -315,9 +468,8 @@ class DeepSeekClient {
           lastRaw = content.isNotEmpty ? content : reasoning;
           _logFailure(
             attempt: attempt,
-            stage: finishReason == 'length'
-                ? 'truncated-empty'
-                : 'empty-content',
+            stage:
+                finishReason == 'length' ? 'truncated-empty' : 'empty-content',
             status: resp.status,
             body: reasoning.isNotEmpty ? reasoning : content,
             elapsedMs: callMs,
@@ -349,8 +501,7 @@ class DeepSeekClient {
         // （实测失控输出重试 3 次 = 卡住 12 分钟）。直接返回清晰错误，
         // 让上层提示用户：图太密集，程序会自动切片；或补充结构提示。
         if (finishReason == 'length') {
-          lastError =
-              'AI 输出达到上限（${config.maxTokens} token）被截断，'
+          lastError = 'AI 输出达到上限（${config.maxTokens} token）被截断，'
               '未生成完整 JSON。这张图单位过多/文字过密，'
               '请尝试：① 用裁剪工具把图分成几张分别识别；② 在补充说明里写结构骨架。';
           onProgress?.call('输出过长被截断，已停止重试');
@@ -381,9 +532,19 @@ class DeepSeekClient {
         final tree = OrbatNode.fromJson(parsed);
         return GenerateResult(tree: tree, rawJson: clean, attempts: attempt);
       } catch (e) {
+        final DeepSeekErrorKind kind = e is TimeoutException
+            ? DeepSeekErrorKind.timeout
+            : (e is SocketException || e is HttpException)
+                ? DeepSeekErrorKind.network
+                : DeepSeekErrorKind.unknown;
         lastError = e.toString();
         _logFailure(attempt: attempt, stage: 'exception', error: e);
-        onProgress?.call('解析异常：$lastError');
+        onProgress?.call('请求异常：$lastError');
+        if (attempt < config.maxRetries && !isPermanentError(kind)) {
+          final Duration wait = retryDelayFor(attempt);
+          onProgress?.call('${wait.inSeconds}s 后重试…');
+          await Future<void>.delayed(wait);
+        }
       }
     }
 

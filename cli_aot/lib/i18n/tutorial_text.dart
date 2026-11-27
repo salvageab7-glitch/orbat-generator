@@ -29,13 +29,13 @@ const String kTutorialZh = '''
 ────────────────────────────
 模式一 · 纯软件
   在本软件界面里识图、校验、出图。需要 DeepSeek API Key。
-模式二 · 软件 + CLI
+模式二 · 软件 + CLI（仅桌面端；Android 不支持）
   软件里配 Key，命令行 orbat-cli 交给脚本或 Agent 调用。需要 API Key。
 模式三 · Agent 插件
   用 orbat-cli prompts 导出提示词，交给外部 Agent 识图；
   本软件不配 Key，但校验、编辑、出图照常可用。
 
-只有模式一、模式二需要 API Key。模式三完全不需要。
+只有模式一、模式二需要 API Key；模式二仅桌面端。模式三完全不需要。
 
 ────────────────────────────
 三、配置 API Key（模式一 / 二）
@@ -171,13 +171,13 @@ Input can be an image, or text pasted from a table.
 ────────────────────────────
 Mode 1 · Standalone app
   Recognise, validate and render inside this app. Needs a DeepSeek API key.
-Mode 2 · App + CLI
+Mode 2 · App + CLI (desktop only; not supported on Android)
   The app holds the key; scripts or agents drive orbat-cli. Needs an API key.
 Mode 3 · Agent plugin
   Export prompts with orbat-cli prompts and let an external agent recognise the
   chart. No key stored here, but validation, editing and rendering still work.
 
-Only Modes 1 and 2 need an API key. Mode 3 needs none.
+Only Modes 1 and 2 need an API key; Mode 2 is desktop-only. Mode 3 needs none.
 
 ────────────────────────────
 3. Set up an API key (Modes 1 / 2)

@@ -1,6 +1,8 @@
 package com.orbat.orbat_core
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -34,11 +36,7 @@ class MainActivity : FlutterActivity() {
         storageChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
                 "isManageStorageGranted" -> {
-                    result.success(
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
-                            Environment.isExternalStorageManager()
-                        else true
-                    )
+                    result.success(hasStorageAccess())
                 }
                 "requestManageStorage" -> {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -53,7 +51,14 @@ class MainActivity : FlutterActivity() {
                         } catch (e: Exception) {
                             result.error("INTENT", e.message, null)
                         }
-                    } else result.success(true)
+                    } else {
+                        // Android 10 及以下：公共 Download 写入依赖传统存储权限。
+                        requestPermissions(
+                            arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                            REQUEST_WRITE_STORAGE
+                        )
+                        result.success(true)
+                    }
                 }
                 "consumePendingRun" -> {
                     result.success(pendingPluginRun)
@@ -89,6 +94,27 @@ class MainActivity : FlutterActivity() {
         if (intent?.action == PluginRunAction) {
             pendingPluginRun = true
             intent.action = Intent.ACTION_MAIN
+        }
+    }
+
+    private fun hasStorageAccess(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_WRITE_STORAGE) {
+            val granted = grantResults.isNotEmpty() &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED
+            storageChannel?.invokeMethod("storagePermissionResult", granted)
         }
     }
 
@@ -155,5 +181,6 @@ class MainActivity : FlutterActivity() {
         private const val GCM_IV_BYTES = 12
         private const val GCM_TAG_BITS = 128
         private const val GCM_TAG_BYTES = GCM_TAG_BITS / 8
+        private const val REQUEST_WRITE_STORAGE = 4701
     }
 }

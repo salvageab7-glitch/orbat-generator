@@ -1,6 +1,9 @@
 /// ORBAT system prompt —— 把 orbat-json-writer skill 的规则固化给 DeepSeek
 /// 目标：让模型从图片/文字资料产出严格 schema 的编制 JSON。
 
+/// 面向 Agent 的提示词契约版本；导出 agent_prompts.txt 时写入头部。
+const String kPromptContractVersion = '2026-11-27-p2';
+
 const String kOrbatSystemPrompt = r'''
 你是军事编制图（ORBAT / Order of Battle）转写专家。用户会给你一张编制图图片或文字资料，你要把它转写成一个严格符合以下规范的 JSON。
 
@@ -14,9 +17,9 @@ const String kOrbatSystemPrompt = r'''
     "sidc": "30位数字SIDC码"
   },
   "subOrganizations": [ /* 子节点，同结构 */ ],
-  "commandLevels": "1"
+  "commandLevels": "3"
 }
-- commandLevels 只在根节点出现，值是字符串 "1"，子节点禁止出现该字段。
+- commandLevels 只在根节点出现，值是字符串 "3"（默认推荐；2 仅特殊宽树），子节点禁止出现该字段。
 
 ## SIDC 码构造（30位，全部数字）
 
@@ -84,7 +87,8 @@ SIDC 硬规则：
 
 ## 层级规则
 - 最多 3 层（旅→营→连 / 师→旅→营）。第 3 层以下不展开（不建排/班/火力组）。
-- 只有纯 HQ 分队才比母体低一级：连→连部用 15→14，营→营部用 16→15，旅→旅部用 18→15。
+- 只有纯 HQ 分队才比母体低一级：排部=13，连部=14，营部连/旅部连/师部/军部/中队部连=15（HHC/HHT 是连级）。
+- 合成 HQ 按所含实兵：旅部及旅部连=15，师部及师部营=16；不要机械写成 15。
 - “师部及师部营”“旅部及旅部连”这类合成单位按所含实兵梯队取码：师部及师部营=营 16，旅部及旅部连=连 15。
 
 ## 命名铁律

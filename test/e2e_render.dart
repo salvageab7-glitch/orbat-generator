@@ -10,19 +10,21 @@ import 'dart:io';
 import '../lib/core/orbat.dart';
 import '../lib/render/renderer.dart';
 
-const _defaultScript = r'C:\Users\胡宇晨\Desktop\01-编制工作\编制生成器\_tools\render_orbat.js';
-
 void main(List<String> args) async {
   if (args.isEmpty) {
-    stderr.writeln('用法: dart run test/e2e_render.dart <input.json> [outBase]');
+    stderr.writeln(
+      '用法: dart run test/e2e_render.dart <input.json> [outBase] [renderScript]',
+    );
     exitCode = 64;
     return;
   }
 
   final srcPath = args[0];
-  final outBase = args.length > 1
-      ? args[1]
-      : '${Directory.current.path}/test/_e2e_auto';
+  final outBase =
+      args.length > 1 ? args[1] : '${Directory.current.path}/test/_e2e_auto';
+  final script = args.length > 2
+      ? args[2]
+      : '${Directory.current.path}${Platform.pathSeparator}runtime${Platform.pathSeparator}render_orbat.js';
 
   final src = File(srcPath);
   if (!src.existsSync()) {
@@ -54,7 +56,7 @@ void main(List<String> args) async {
   print('[3/4] 归一化完成：${jsonStr.length} 字符');
 
   // 4) 出图
-  final renderer = OrbatRenderer(RendererConfig(scriptPath: _defaultScript));
+  final renderer = OrbatRenderer(RendererConfig(scriptPath: script));
   print('[4/4] 出图中（联网，约 30-90 秒）...');
   final result = await renderer.render(
     normalizedJson: jsonStr,
@@ -70,7 +72,8 @@ void main(List<String> args) async {
   final png = File(result.pngPath!);
   print('');
   print('=== 端到端通过 ===');
-  print('  PNG : ${result.pngPath} (${(png.lengthSync() / 1024).toStringAsFixed(0)} KB)');
+  print(
+      '  PNG : ${result.pngPath} (${(png.lengthSync() / 1024).toStringAsFixed(0)} KB)');
   print('  SVG : ${result.svgPath ?? "未产出"}');
   print('  耗时: ${result.elapsed.inSeconds} 秒');
 }

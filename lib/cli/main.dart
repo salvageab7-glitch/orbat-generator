@@ -20,11 +20,14 @@ import '../i18n/l10n.dart';
 import '../i18n/tutorial_text.dart';
 import '../core/dup_scan.dart';
 import '../core/orbat.dart';
+import '../core/orbat_schema.dart';
 import '../core/patch_repair.dart';
 import '../core/sidc_audit.dart';
 import '../core/self_check.dart';
 import '../core/usage_store.dart';
 import '../pipeline.dart';
+import '../render/renderer.dart'
+    show RenderQuality, RenderResult, downscalePngToWidth;
 import '../ai/image_prep.dart';
 import '../ai/prompt.dart';
 import '../services/settings_store.dart';
@@ -45,6 +48,7 @@ Map<String, dynamic> _ok(
   Map<String, dynamic> data, {
   bool ok = true,
 }) {
+  AppLogger.instance.info('cli', ok ? '完成: $cmd' : '失败: $cmd');
   // 产物目录宣告：AI Agent 调用 CLI 后，必须能明确知道产物落在哪个文件夹。
   // 从 data 里的路径字段提取父目录；取不到则用输出目录配置/桌面。
   String? dir;
@@ -63,6 +67,8 @@ Map<String, dynamic> _ok(
       ...data,
       // 明确宣告给 Agent：产物生成目标目录（绝对路径）
       'outputDir': d,
+      // 日志位置：正常日志 14 天；错误报告另存，不随正常日志删除。
+      'logs': _logInfo(),
     },
   };
   // 顶层 ok=false 时补一个便于宿主直接读取的错误字段。
@@ -72,17 +78,40 @@ Map<String, dynamic> _ok(
   return result;
 }
 
+/// 当前日志/错误报告位置，供 Agent 直接读取。
+Map<String, dynamic> _logInfo() {
+  final log = AppLogger.instance;
+  return <String, dynamic>{
+    'enabled': log.isEnabled,
+    'normalDir': log.logDirPath,
+    'normalCurrent': log.currentLogPath,
+    'normalKeepDays': AppLogger.keepDays,
+    'errorDir': log.errorReportDirPath,
+    'errorRetention': 'persistent',
+  };
+}
+
 /// CLI 兜底输出目录（命令自身已优先用输入目录）。
 ///
 /// 0.3.2 起统一为 exe 同级「输出文件存档\」：与 GUI 一致、不写桌面根，
 /// 且对 Agent 调用方而言目录位置可预测（就在 orbat-cli.exe 旁边）。
 String _defaultCliOutputDir() => ensureArchiveDir();
 
-Map<String, dynamic> _fail(String cmd, String msg) => {
-      'ok': false,
-      'command': cmd,
-      'error': msg,
-    };
+/// 失败信封：同步落一份独立错误报告（含正常日志尾部），并给出路径。
+///
+/// 报告与正常日志分开存放，正常日志 14 天自动清理，错误报告不自动删除。
+Map<String, dynamic> _fail(String cmd, String msg, {String? reportPath}) {
+  AppLogger.instance.warn('cli', '$cmd 失败: $msg');
+  final String? report =
+      reportPath ?? AppLogger.instance.saveErrorReportSync('cli-$cmd', msg);
+  return {
+    'ok': false,
+    'command': cmd,
+    'error': msg,
+    if (report != null) 'errorReport': report,
+    'logs': _logInfo(),
+  };
+}
 
 /// 去掉 UTF-8 BOM；Windows 记事本/PowerShell 管道偶尔会带。
 String _stripBom(String text) =>
@@ -211,6 +240,12 @@ Future<void> _runMain(List<String> args) async {
       case 'prompts':
         await _cmdPrompts(rest);
         break;
+      case 'logs':
+        await _cmdLogs(rest);
+        break;
+      case 'schema':
+        await _cmdSchema(rest);
+        break;
       case 'batch':
         await _cmdBatch(rest);
         break;
@@ -224,7 +259,14 @@ Future<void> _runMain(List<String> args) async {
   } catch (e, st) {
     _err('异常: $e');
     _err(st.toString().split('\n').take(4).join('\n'));
-    _out(_fail(cmd, '$e'));
+    AppLogger.instance.error('cli', '异常: $e', e, st);
+    final String? report = AppLogger.instance.saveErrorReportSync(
+      'cli-$cmd',
+      '$e',
+      error: e,
+      stack: st,
+    );
+    _out(_fail(cmd, '$e', reportPath: report));
     exitCode = 1;
   }
 }
@@ -309,8 +351,7 @@ Future<String?> _readInputOrIn(List<String> args) async {
 
 /// audit —— 一致性审计 + 结构校验 + 跨父同名扫描（只读，不改文件）
 Future<void> _cmdAudit(List<String> args) async {
-  final strict =
-      args.contains('--strict') || args.contains('--fail-on-red');
+  final strict = args.contains('--strict') || args.contains('--fail-on-red');
   final text = await _readInputWithIn(args);
   if (text == null) {
     _out(_fail('audit', '没有输入：请传文件路径或通过 stdin 管道输入 JSON'));
@@ -493,6 +534,7 @@ Future<void> _cmdRender(List<String> args) async {
     apiKey: settings.apiKey,
     model: settings.model,
     renderScriptPath: settings.renderScriptPath,
+    apiBaseUrl: settings.apiBaseUrl,
     whiteBackground: whiteBg,
     forceChinese: forceChinese,
   );
@@ -569,6 +611,40 @@ Future<void> _cmdRender(List<String> args) async {
   // 修正条数；源 tree 保持不动。这里不再预先修改，否则 notice 永远是 0。
   final root = tree!;
 
+  // validate-only：只做结构解析 + 校验，不启动浏览器、不写 PNG/SVG。
+  if (args.contains('--validate-only')) {
+    final report = OrbatValidator.validate(root);
+    final levels = root.commandLevels.trim() == '2' ? '2' : '3';
+    _out(_ok('render', {
+      'source': sourceInfo,
+      'nodeCount': report.nodeCount,
+      'depth': report.depth,
+      'redCount': report.redCount,
+      'warnCount': report.warnCount,
+      'ok': report.ok,
+      'deliverable': report.ok,
+      'commandLevelsInput': root.commandLevels,
+      'commandLevelsOutput': levels,
+      'outputDir': (inputPath ?? imagePath ?? textPath) != null
+          ? File((inputPath ?? imagePath ?? textPath)!).parent.path
+          : _defaultCliOutputDir(),
+      'issues': report.issues
+          .map((i) => {
+                'level': i.level,
+                'path': i.path,
+                'message': i.message,
+              })
+          .toList(),
+      'render': {
+        'ok': false,
+        'skipped': true,
+        'reason': 'validate-only',
+      },
+    }));
+    exitCode = report.ok ? 0 : 3;
+    return;
+  }
+
   // 确定输出基名：显式 --out 优先；否则用输入目录 + 日期 + 根名
   final resolvedBase = outBase ??
       () {
@@ -580,7 +656,15 @@ Future<void> _cmdRender(List<String> args) async {
         final stamp = DateTime.now().toIso8601String().substring(0, 10);
         return '$inputDir${Platform.pathSeparator}${stamp}_$name';
       }();
-  final r = await pipeline.render(root, outputBase: resolvedBase);
+  final maxWidth = int.tryParse(_option(args, 'max-width') ?? '') ?? 4096;
+  final rendered = await _renderWithLayout(
+    pipeline,
+    root,
+    resolvedBase,
+    maxWidth: maxWidth,
+    whiteBackground: whiteBg,
+  );
+  final r = rendered.result;
   final data = <String, dynamic>{
     'outputBase': resolvedBase,
     'source': sourceInfo,
@@ -591,11 +675,120 @@ Future<void> _cmdRender(List<String> args) async {
     'error': r.error ?? (r.ok ? null : '渲染失败'),
     'elapsedMs': r.elapsed.inMilliseconds,
     'notices': r.notices,
+    'layout': rendered.layout,
+    if (r.quality != null) 'quality': r.quality!.toJson(),
   };
   // render 的成败必须同时反映在顶层 ok 和进程退出码上；
   // 校验红牌仍走 validate 的“报告”语义，不受此影响。
   _out(_ok('render', data, ok: r.ok));
   if (!r.ok) exitCode = 1;
+}
+
+/// 出图并在超宽时尝试 `commandLevels:"2"`；只保留更窄的结果。
+///
+/// 不改变源 tree：commandLevels 通过 pipeline 的 override 只作用于渲染副本。
+/// 返回渲染结果与 `layout` 决策，供 Agent 判断是否“已优化/仍建议桌面查看”。
+Future<({RenderResult result, Map<String, dynamic> layout})> _renderWithLayout(
+  OrbatPipeline pipeline,
+  OrbatNode root,
+  String outputBase, {
+  int maxWidth = 4096,
+  bool whiteBackground = true,
+}) async {
+  final String inputLevels = root.commandLevels.trim();
+  final String effectiveInput = inputLevels == '2' ? '2' : '3';
+  var result = await pipeline.render(root, outputBase: outputBase);
+  final layout = <String, dynamic>{
+    'commandLevelsInput': inputLevels,
+    'commandLevelsOutput': effectiveInput,
+    'width': result.quality?.width ?? 0,
+    'height': result.quality?.height ?? 0,
+    'strategy': 'default',
+  };
+
+  final int width = result.quality?.width ?? 0;
+  final bool tooWide = width > maxWidth;
+  if (!result.ok || !tooWide) {
+    return (result: result, layout: layout);
+  }
+
+  if (effectiveInput != '2') {
+    // 只有“3 已超宽”才尝试 2；2 不一定更窄，必须比较后保留更窄者。
+    final String tmpBase = '${outputBase}.__cl2';
+    final RenderResult second = await pipeline.render(
+      root,
+      outputBase: tmpBase,
+      commandLevelsOverride: '2',
+    );
+    final int secondWidth = second.quality?.width ?? 0;
+
+    if (second.ok && secondWidth > 0 && secondWidth < width) {
+      for (final String ext in const <String>['.png', '.svg']) {
+        final File orig = File('$outputBase$ext');
+        final File tmp = File('$tmpBase$ext');
+        try {
+          if (await orig.exists()) await orig.delete();
+          if (await tmp.exists()) await tmp.rename('$outputBase$ext');
+        } catch (_) {}
+      }
+      result = RenderResult(
+        ok: second.ok,
+        svgPath: '$outputBase.svg',
+        pngPath: '$outputBase.png',
+        error: second.error,
+        elapsed: second.elapsed,
+        logPath: second.logPath,
+        quality: second.quality,
+        notices: second.notices,
+      );
+      layout['commandLevelsOutput'] = '2';
+      layout['strategy'] = 'commandLevels2';
+      layout['width'] = secondWidth;
+      layout['height'] = second.quality?.height ?? 0;
+    } else {
+      for (final String ext in const <String>['.png', '.svg']) {
+        try {
+          final File tmp = File('$tmpBase$ext');
+          if (await tmp.exists()) await tmp.delete();
+        } catch (_) {}
+      }
+      layout['strategy'] = 'keep-3';
+    }
+  }
+
+  // 最后手段：仍超宽时等比缩成整图（不分页），并保留提示。
+  if (result.ok &&
+      result.pngPath != null &&
+      (result.quality?.width ?? 0) > maxWidth) {
+    final int before = result.quality?.width ?? 0;
+    final RenderQuality q = await downscalePngToWidth(
+      result.pngPath!,
+      maxWidth: maxWidth,
+      whiteBackground: whiteBackground,
+    );
+    if (q.ok && q.width > 0) {
+      result = RenderResult(
+        ok: result.ok,
+        svgPath: result.svgPath,
+        pngPath: result.pngPath,
+        error: result.error,
+        elapsed: result.elapsed,
+        logPath: result.logPath,
+        quality: q,
+        notices: result.notices,
+      );
+      layout['strategy'] = 'downscale';
+      layout['width'] = q.width;
+      layout['height'] = q.height;
+      layout['scale'] =
+          before == 0 ? 1 : double.parse((q.width / before).toStringAsFixed(3));
+    }
+  }
+
+  if ((result.quality?.width ?? 0) > maxWidth) {
+    layout['warning'] = '建议桌面查看';
+  }
+  return (result: result, layout: layout);
 }
 
 Future<void> _cmdGenerate(List<String> args) async {
@@ -618,7 +811,8 @@ Future<void> _cmdGenerate(List<String> args) async {
             '若你是 AI Agent（模式三），请用自己的模型读图生成 JSON，'
             '再调用 parse/validate 校验、render 出图；'
             '可用 `prompts` 命令导出本软件的工作流提示词。'
-            '或设置 DEEPSEEK_API_KEY 环境变量 / 在 GUI 设置里填 Key。'));
+            '或设置 DEEPSEEK_API_KEY / OPENAI_API_KEY 环境变量，'
+            '或在 GUI 设置里填 Key 与 OpenAI 兼容 API 地址。'));
     exitCode = 2;
     return;
   }
@@ -626,6 +820,7 @@ Future<void> _cmdGenerate(List<String> args) async {
     apiKey: settings.apiKey,
     model: settings.model,
     renderScriptPath: settings.renderScriptPath,
+    apiBaseUrl: settings.apiBaseUrl,
   );
 
   PipelineResult r;
@@ -677,6 +872,7 @@ Future<void> _cmdSelfCheck(List<String> args) async {
   final settings = await SettingsStore.load();
   final r = await SelfCheck.run(
     renderScriptPath: settings.renderScriptPath,
+    apiBaseUrl: settings.apiBaseUrl,
     apiKey: settings.apiKey,
     // selfcheck --smoke：真渲染一次，验证"能不能出图"（约 15-25 秒）
     smokeRender: args.contains('--smoke'),
@@ -767,48 +963,104 @@ Future<void> _cmdBatch(List<String> args) async {
 
   final settings = await SettingsStore.load();
   final whiteBg = _flag(args, 'white-bg', defaultValue: true);
+  final bool validateOnly = args.contains('--validate-only');
+  final bool rescan = !args.contains('--no-rescan');
+  final int maxWidth = int.tryParse(_option(args, 'max-width') ?? '') ?? 4096;
   final results = <Map<String, dynamic>>[];
+  final processed = <String>{};
+  var pending = files;
+  var rescanPasses = 0;
 
-  for (var i = 0; i < files.length; i++) {
-    final f = files[i];
-    _err('[${i + 1}/${files.length}] ${f.path}');
-    final pipeline = OrbatPipeline(
-      apiKey: settings.apiKey,
-      model: settings.model,
-      renderScriptPath: settings.renderScriptPath,
-      whiteBackground: whiteBg,
-    );
+  while (pending.isNotEmpty) {
+    for (var i = 0; i < pending.length; i++) {
+      final f = pending[i];
+      final key = f.absolute.path.toLowerCase();
+      if (!processed.add(key)) continue;
 
-    final name = _baseName(f.path);
-    final targetDir = outDir ?? f.parent.path;
-    final outputBase = '$targetDir${Platform.pathSeparator}${name}';
+      _err('[${processed.length}] ${f.path}');
+      final pipeline = OrbatPipeline(
+        apiKey: settings.apiKey,
+        model: settings.model,
+        renderScriptPath: settings.renderScriptPath,
+        apiBaseUrl: settings.apiBaseUrl,
+        whiteBackground: whiteBg,
+      );
 
-    try {
-      final gen = await pipeline.fromImage(f);
-      if (gen.tree == null) {
+      final name = _baseName(f.path);
+      final targetDir = outDir ?? f.parent.path;
+      final outputBase = '$targetDir${Platform.pathSeparator}${name}';
+
+      try {
+        final gen = await pipeline.fromImage(f);
+        if (gen.tree == null) {
+          results.add({
+            'file': f.path,
+            'ok': false,
+            'error': gen.error ?? '识图失败',
+          });
+          continue;
+        }
+        final jsonPath = '$outputBase.json';
+        await File(jsonPath)
+            .writeAsString(gen.rawJson ?? normalizeTreeJson(gen.tree!));
+        if (validateOnly) {
+          final report = OrbatValidator.validate(gen.tree!);
+          results.add({
+            'file': f.path,
+            'ok': report.ok,
+            'nodeCount': report.nodeCount,
+            'json': jsonPath,
+            'redCount': report.redCount,
+            'warnCount': report.warnCount,
+            'issues': report.issues
+                .map((i) => {
+                      'level': i.level,
+                      'path': i.path,
+                      'message': i.message,
+                    })
+                .toList(),
+            'render': {
+              'ok': false,
+              'skipped': true,
+              'reason': 'validate-only',
+            },
+          });
+          continue;
+        }
+        final rendered = await _renderWithLayout(
+            pipeline, gen.tree!, outputBase,
+            maxWidth: maxWidth, whiteBackground: whiteBg);
+        final r = rendered.result;
         results.add({
           'file': f.path,
-          'ok': false,
-          'error': gen.error ?? '识图失败',
+          'ok': r.ok,
+          'nodeCount': gen.tree!.count,
+          'json': jsonPath,
+          'png': r.pngPath,
+          'svg': r.svgPath,
+          'error': r.error,
+          'layout': rendered.layout,
+          if (r.quality != null) 'quality': r.quality!.toJson(),
         });
-        continue;
+      } catch (e) {
+        results.add({'file': f.path, 'ok': false, 'error': e.toString()});
       }
-      final jsonPath = '$outputBase.json';
-      await File(jsonPath)
-          .writeAsString(gen.rawJson ?? normalizeTreeJson(gen.tree!));
-      final r = await pipeline.render(gen.tree!, outputBase: outputBase);
-      results.add({
-        'file': f.path,
-        'ok': r.ok,
-        'nodeCount': gen.tree!.count,
-        'json': jsonPath,
-        'png': r.pngPath,
-        'svg': r.svgPath,
-        'error': r.error,
-      });
-    } catch (e) {
-      results.add({'file': f.path, 'ok': false, 'error': e.toString()});
     }
+
+    if (!rescan || rescanPasses >= 2) break;
+    rescanPasses++;
+    // 批次运行期间新增的图片：再扫一次，按绝对路径去重，串行处理。
+    final more = dir
+        .listSync(recursive: recursive)
+        .whereType<File>()
+        .where((f) => exts.contains(_ext(f.path).toLowerCase()))
+        .where((f) => !processed.contains(f.absolute.path.toLowerCase()))
+        .toList()
+      ..sort((a, b) => a.path.compareTo(b.path));
+    if (more.isNotEmpty) {
+      _err('追加 ${more.length} 个新文件');
+    }
+    pending = more;
   }
 
   final okCount = results.where((r) => r['ok'] == true).length;
@@ -816,6 +1068,7 @@ Future<void> _cmdBatch(List<String> args) async {
     'total': results.length,
     'success': okCount,
     'failed': results.length - okCount,
+    'rescanPasses': rescanPasses,
     'results': results,
   }));
   if (okCount < results.length) exitCode = 3;
@@ -854,6 +1107,7 @@ Future<void> _cmdRetryTile(List<String> args) async {
     apiKey: settings.apiKey,
     model: settings.model,
     renderScriptPath: settings.renderScriptPath,
+    apiBaseUrl: settings.apiBaseUrl,
   ).fromImage(tile);
 
   if (r.tree == null) {
@@ -952,6 +1206,72 @@ Future<void> _cmdPrompts(List<String> args) async {
   }));
 }
 
+/// `logs`：返回日志路径；`--tail` 附带正常日志尾部，`--errors` 列出错误报告。
+Future<void> _cmdLogs(List<String> args) async {
+  final bool wantTail = args.contains('--tail');
+  final bool wantErrors = args.contains('--errors');
+  final info = _logInfo();
+
+  String? tailText;
+  if (wantTail) {
+    final String? p = AppLogger.instance.currentLogPath;
+    if (p != null) {
+      final File f = File(p);
+      if (f.existsSync()) {
+        final List<String> lines = f.readAsStringSync().split('\n');
+        tailText =
+            (lines.length <= 80 ? lines : lines.sublist(lines.length - 80))
+                .join('\n')
+                .trim();
+      }
+    }
+  }
+
+  final List<Map<String, dynamic>> reports = <Map<String, dynamic>>[];
+  if (wantErrors) {
+    final String? dir = AppLogger.instance.errorReportDirPath;
+    if (dir != null) {
+      final Directory d = Directory(dir);
+      if (d.existsSync()) {
+        for (final File f in d.listSync().whereType<File>()) {
+          reports.add(<String, dynamic>{
+            'path': f.path,
+            'modified': f.lastModifiedSync().toIso8601String(),
+            'bytes': f.lengthSync(),
+          });
+        }
+        reports.sort((Map<String, dynamic> a, Map<String, dynamic> b) =>
+            (b['modified'] as String).compareTo(a['modified'] as String));
+      }
+    }
+  }
+
+  _out(_ok('logs', <String, dynamic>{
+    ...info,
+    if (tailText != null) 'tail': tailText,
+    if (wantErrors) 'errorReports': reports,
+  }));
+}
+
+/// `schema`：输出/导出 ORBAT JSON Schema（结构契约）。
+Future<void> _cmdSchema(List<String> args) async {
+  final String? out = _option(args, 'out');
+  if (out != null && out.isNotEmpty) {
+    await File(out).writeAsString(kOrbatSchemaJson, flush: true);
+    _out(_ok('schema', <String, dynamic>{
+      'version': kOrbatSchemaVersion,
+      'out': out,
+      'chars': kOrbatSchemaJson.length,
+    }));
+    return;
+  }
+  _out(_ok('schema', <String, dynamic>{
+    'version': kOrbatSchemaVersion,
+    'schema': jsonDecode(kOrbatSchemaJson),
+    'note': '结构校验用；注释长度/SIDC 语义/重名等仍以 validate 为准。用 --out 导出文件。',
+  }));
+}
+
 Future<void> _cmdConfig(List<String> args) async {
   final s = await SettingsStore.load();
   _out(_ok('config', {
@@ -960,10 +1280,13 @@ Future<void> _cmdConfig(List<String> args) async {
     'configVersion': s.configVersion,
     'currentConfigVersion': SettingsStore.currentConfigVersion,
     'model': s.model,
+    'apiBaseUrl': s.apiBaseUrl,
+    'providerType': s.providerType,
     'knownModels': SettingsStore.knownModels,
     'hasApiKey': s.apiKey.isNotEmpty,
     'apiKeyFingerprint': AppLogger.keyFingerprint(s.apiKey),
     'whiteBackground': s.whiteBackground,
+    'commandLevels': s.commandLevels,
     'renderScriptPath': s.renderScriptPath,
     'lastDir': s.lastDir,
   }));
@@ -1011,6 +1334,8 @@ ORBAT CLI —— 编制图生成器的命令行接口
   batch      批量识图+出图（目录里所有图片）
   retry-tile 单独重跑某个识别失败的图块
   prompts    导出软件内置工作流提示词（模式三给 Agent 用，零 API）
+  logs       查看日志/错误报告位置（--tail 看日志尾部，--errors 列错误报告）
+  schema     输出/导出 ORBAT JSON Schema（结构契约）
 
 输入方式:
   · --in 文件:  orbat.bat validate --in 编制.json
@@ -1027,6 +1352,9 @@ ORBAT CLI —— 编制图生成器的命令行接口
   --raw-names           generate 时保留原文称号/番号（默认译成中文）
   --adapt-for-render    normalize 时按名称修正梯队段（仅影响渲染副本）
   --command-levels 3    normalize 的 commandLevels
+  --validate-only       render 只校验，不出图（exit 3=红牌）
+  --max-width <px>      超宽自动尝试 commandLevels:"2" 的阈值（默认 4096）
+  --no-rescan           batch 结束后不再扫描新增文件
   --no-white-bg         render 输出透明底 PNG
   --white-bg false      同上，显式关闭白底
   --smoke               selfcheck 时真渲染一次（约 15-25 秒）
@@ -1049,6 +1377,7 @@ batch / tutorial / prompts / retry-tile:
 输出约定:
   stdout 永远是一个 JSON 对象: {"ok":bool,"command":..,"data":{..},"error":..}
   stderr 只放诊断信息
+  data.logs 给出正常日志/错误报告路径；失败顶层另有 errorReport
   exit code: 0=成功 1=执行失败 2=参数错误 3=校验/自检/批量/audit --strict 发现问题
   render 失败时顶层 ok=false 且 exit=1；validate 红牌仍返回顶层 ok=true、exit=3
 
@@ -1071,5 +1400,7 @@ batch / tutorial / prompts / retry-tile:
 /// 所以显式 exit 保证进程立即返回（外部 agent 才能拿到结果）。
 Future<void> main(List<String> args) async {
   await _runMain(args);
+  // 先把队列里的正常日志落盘，再强制退出，避免 Agent 读不到本次记录。
+  await AppLogger.instance.close();
   exit(exitCode);
 }

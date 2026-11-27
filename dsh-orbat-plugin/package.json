@@ -1,6 +1,6 @@
 {
   "name": "@local/orbat-agent",
-  "version": "0.3.6",
+  "version": "0.3.7-beta",
   "description": "Validate ORBAT JSON and render PNG/SVG files for an AI agent.",
   "license": "MIT",
   "type": "module",

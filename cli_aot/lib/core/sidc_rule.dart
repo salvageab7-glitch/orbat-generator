@@ -93,7 +93,6 @@ class SidcRule {
     };
   }
 
-
   /// 层级词是否落在名称尾部（最后一个词附近）。
   ///
   /// 用途：一致性审计只在"尾部有层级词"时才敢按名称改梯队码。
@@ -194,8 +193,8 @@ class SidcRule {
       List<({int at, int len, String code})> cands) {
     final kept = <({int at, int len, String code})>[];
     for (final c in cands) {
-      final inside = cands.any((o) =>
-          o.len > c.len && o.at <= c.at && o.at + o.len >= c.at + c.len);
+      final inside = cands.any(
+          (o) => o.len > c.len && o.at <= c.at && o.at + o.len >= c.at + c.len);
       if (!inside) kept.add(c);
     }
     return kept;
@@ -268,7 +267,10 @@ class SidcRule {
     }
 
     // ---- 迫击炮（须在炮兵之前）----
-    if (n.contains('迫击炮') || n.contains('2С9') || n.contains('2Б') || n.contains('Миномёт')) {
+    if (n.contains('迫击炮') ||
+        n.contains('2С9') ||
+        n.contains('2Б') ||
+        n.contains('Миномёт')) {
       return const _Arm('130800', '00', '00', '迫击炮');
     }
 
@@ -282,7 +284,10 @@ class SidcRule {
     }
 
     // ---- 炮兵侦察/观察（须在普通炮兵之前，站点 130400）----
-    if (n.contains('炮兵侦察') || n.contains('炮兵观察') || n.contains('炮观') || n.contains('前方观察')) {
+    if (n.contains('炮兵侦察') ||
+        n.contains('炮兵观察') ||
+        n.contains('炮观') ||
+        n.contains('前方观察')) {
       return const _Arm('130400', '00', '00', '炮兵侦察/观察');
     }
 
@@ -307,12 +312,35 @@ class SidcRule {
       return _Arm('130101', '00', selfPropelled ? '23' : '00', '防空');
     }
 
+    // ---- 战役战术导弹（须在防空之后，避免“防空导弹”被当成通用导弹）----
+    if (n.contains('战役战术导弹') ||
+        n.contains('战术导弹') ||
+        n.contains('导弹旅') ||
+        n.contains('导弹营') ||
+        n.contains('导弹连') ||
+        n.contains('导弹分队')) {
+      return const _Arm('130700', '00', '00', '战役战术导弹');
+    }
+
+    // ---- 空中骑兵 / 航空支援（陆军航空）----
+    if (n.contains('空中骑兵') ||
+        n.contains('空中机动') ||
+        n.contains('航空支援') ||
+        n.contains('航空连')) {
+      return const _Arm('120600', '00', '00', '空中骑兵/航空支援');
+    }
+
     // ---- 步兵战车 IFV / 装甲步兵（须在坦克之前，避免"装甲步兵"被判成坦克）----
     if (n.contains('步兵战车') || n.contains('步战车')) {
       return const _Arm('121105', '00', '00', '步兵战车IFV');
     }
     if (n.contains('装甲步兵') || n.contains('机械步兵')) {
       return const _Arm('121102', '00', '00', '装甲机械化');
+    }
+
+    // ---- 装甲列车（站点无独立实体码，按装甲处理并用名称区分）----
+    if (n.contains('装甲列车') || n.contains('装甲火车') || n.contains('列车炮')) {
+      return const _Arm('120500', '00', '00', '装甲列车(按装甲处理)');
     }
 
     // ---- 坦克/装甲 ----
@@ -350,7 +378,10 @@ class SidcRule {
     }
 
     // ---- 工兵 ----
-    if (n.contains('工兵') || n.contains('工程') || n.contains('舟桥') || n.contains('排爆')) {
+    if (n.contains('工兵') ||
+        n.contains('工程') ||
+        n.contains('舟桥') ||
+        n.contains('排爆')) {
       return const _Arm('140700', '00', '00', '工兵');
     }
 
@@ -372,6 +403,19 @@ class SidcRule {
     // ---- 军法署（160800；站点 Judge Advocate General）----
     if (n.contains('军法')) {
       return const _Arm('160800', '00', '00', '军法署');
+    }
+
+    // ---- 人事/副官署（165600 Human Resources）----
+    if (n.contains('副官') ||
+        n.contains('人事') ||
+        n.contains('人力资源') ||
+        RegExp(r'\bHR\b').hasMatch(n)) {
+      return const _Arm('165600', '00', '00', '人事/副官署');
+    }
+
+    // ---- 军需（162900 Quartermaster）----
+    if (n.contains('军需') || n.contains('粮秣')) {
+      return const _Arm('162900', '00', '00', '军需');
     }
 
     // ---- 后勤/保障 ----
@@ -445,7 +489,8 @@ _Arm? _foreignArm(String raw) {
     return const _Arm('130300', '00', '00', '多管火箭炮(en)');
   }
   // 反坦克导弹
-  if (RegExp(r'anti-?tank missile|\batgm\b|птур|конкурс|фагот|малютка').hasMatch(s)) {
+  if (RegExp(r'anti-?tank missile|\batgm\b|птур|конкурс|фагот|малютка')
+      .hasMatch(s)) {
     return const _Arm('120400', '00', '00', '反坦克导弹(en)');
   }
   // 反坦克（通用）
@@ -469,6 +514,21 @@ _Arm? _foreignArm(String raw) {
   if (RegExp(r'air ?defen[cs]e|\bsam\b|\baaa\b|пво|зенит').hasMatch(s)) {
     return const _Arm('130101', '00', '00', '防空(en)');
   }
+  // 装甲列车（站点无独立实体码，按装甲处理）
+  if (RegExp(r'armou?red train|railway gun|railroad gun').hasMatch(s)) {
+    return const _Arm('120500', '00', '00', '装甲列车(en)');
+  }
+  // 战役战术导弹（通用导弹；防空导弹已在上方处理）
+  if (RegExp(
+          r'theater missile|tactical missile|missile (brigade|battalion|company|detachment)|missile unit')
+      .hasMatch(s)) {
+    return const _Arm('130700', '00', '00', '战役战术导弹(en)');
+  }
+  // 空中骑兵 / 航空支援（陆军航空）
+  if (RegExp(r'air cavalry|air assault|aviation support|aviation company')
+      .hasMatch(s)) {
+    return const _Arm('120600', '00', '00', '空中骑兵/航空支援(en)');
+  }
   // 装甲 / 坦克
   if (RegExp(r'\btank\b|armou?red|бронетанк|танков').hasMatch(s)) {
     return const _Arm('120500', '00', '00', '装甲坦克(en)');
@@ -486,7 +546,8 @@ _Arm? _foreignArm(String raw) {
     return const _Arm('111000', '00', '00', '通信(en)');
   }
   // 医疗/卫生（161300）
-  if (RegExp(r'medical|medical company|hospital|медицин|sanitary').hasMatch(s)) {
+  if (RegExp(r'medical|medical company|hospital|медицин|sanitary')
+      .hasMatch(s)) {
     return const _Arm('161300', '00', '00', '医疗/卫生(en)');
   }
   // 雷达站（121600 监视）
@@ -496,6 +557,14 @@ _Arm? _foreignArm(String raw) {
   // 军法署（160800）
   if (RegExp(r'judge advocate|\bjag\b|военн?ый суд').hasMatch(s)) {
     return const _Arm('160800', '00', '00', '军法署(en)');
+  }
+  // 人事/副官署（165600）
+  if (RegExp(r'adjutant|human resources|\bhr\b|personnel').hasMatch(s)) {
+    return const _Arm('165600', '00', '00', '人事/副官署(en)');
+  }
+  // 军需（162900）
+  if (RegExp(r'quartermaster|supply (company|battalion|depot)').hasMatch(s)) {
+    return const _Arm('162900', '00', '00', '军需(en)');
   }
   // 后勤 / 保障
   if (RegExp(r'supply|logistic|transport|maintenance|снабж|ремонт|транспорт')
@@ -507,11 +576,13 @@ _Arm? _foreignArm(String raw) {
     return const _Arm('120600', '00', '00', '陆军航空兵(en)');
   }
   // 步兵战车 IFV（站点 121105）
-  if (RegExp(r'infantry fighting vehicle|\bifv\b|\bbmp\b|marder|步兵战车').hasMatch(s)) {
+  if (RegExp(r'infantry fighting vehicle|\bifv\b|\bbmp\b|marder|步兵战车')
+      .hasMatch(s)) {
     return const _Arm('121105', '00', '00', '步兵战车IFV(en)');
   }
   // 装甲/机械化（履带，站点 121102）
-  if (RegExp(r'mechani[sz]ed|armoured? infantry|панцер|бронетранспорт').hasMatch(s)) {
+  if (RegExp(r'mechani[sz]ed|armoured? infantry|панцер|бронетранспорт')
+      .hasMatch(s)) {
     return const _Arm('121102', '00', '00', '装甲机械化(en)');
   }
   // 摩托化步兵（站点 121104）

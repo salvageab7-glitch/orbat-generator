@@ -13,7 +13,11 @@ import '../core/secret_store.dart';
 
 class SettingsStore {
   /// 配置文件 schema 版本。新增字段/改语义时递增，并在 _migrate 里写迁移逻辑。
-  static const int currentConfigVersion = 7;
+  static const int currentConfigVersion = 10;
+
+  /// 默认 API 地址（DeepSeek；可改为任意 OpenAI 兼容 /v1 地址）。
+  static const String defaultApiBaseUrl = 'https://api.deepseek.com';
+  static const String defaultDeepSeekModel = 'deepseek-flash';
 
   /// 已知模型预设（id → 显示名）。可自由填写不在列表里的模型 id。
   static const Map<String, String> knownModels = {
@@ -36,8 +40,17 @@ class SettingsStore {
   String renderScriptPath;
   String lastDir;
 
+  /// OpenAI 兼容 API 的基址（到 /v1 为止）。
+  String apiBaseUrl;
+
+  /// 服务类型：'deepseek'（默认）或 'openai'（OpenAI 兼容）。
+  String providerType;
+
   /// PNG 是否白底（false = 透明底，方便叠自定义背景图）
   bool whiteBackground;
+
+  /// 渲染指挥层级：'2' 或 '3'。默认 '3'（更紧凑）；2 仅供特殊宽树。
+  String commandLevels;
 
   /// 输出目录（空 = 用默认：exe 同级「输出文件存档\」）。
   /// 用户可通过「更改目录」按钮设置，持久化到 config.json。
@@ -78,10 +91,13 @@ class SettingsStore {
 
   SettingsStore({
     String apiKey = '',
+    this.apiBaseUrl = defaultApiBaseUrl,
+    this.providerType = 'deepseek',
     this.model = 'deepseek-flash',
     this.renderScriptPath = '',
     this.lastDir = '',
     this.whiteBackground = true,
+    this.commandLevels = '3',
     this.outputDir = '',
     this.mode = 0,
     this.emitJson = true,
@@ -126,7 +142,11 @@ class SettingsStore {
     // 环境变量优先：分发给其他用户 / AI Agent 调用时，本机往往没有
     // config.json，用 DEEPSEEK_API_KEY 环境变量传 key 最方便，也避免在
     // 共享机器上把 key 写进配置文件。放在 if 外，无配置文件时同样生效。
-    final envKey = Platform.environment['DEEPSEEK_API_KEY'] ?? '';
+    final envKey = (Platform.environment['DEEPSEEK_API_KEY'] ??
+            Platform.environment['OPENAI_API_KEY'] ??
+            '')
+        .trim();
+    final envBase = (Platform.environment['OPENAI_BASE_URL'] ?? '').trim();
     if (envKey.trim().isNotEmpty) {
       store.apiKey = envKey.trim();
       store._apiKeyFromEnvironment = true;
@@ -147,6 +167,16 @@ class SettingsStore {
           }
         }
         store.model = (map['model'] ?? 'deepseek-flash').toString();
+        final base = (map['apiBaseUrl'] ?? defaultApiBaseUrl).toString().trim();
+        store.apiBaseUrl = base.isEmpty ? defaultApiBaseUrl : base;
+        final rawProvider = (map['providerType'] ?? '').toString().trim();
+        if (rawProvider == 'deepseek' || rawProvider == 'openai') {
+          store.providerType = rawProvider;
+        } else {
+          // 旧配置没有 providerType：按地址推断，避免 OpenAI 地址仍显示 DeepSeek 预设。
+          store.providerType =
+              store.apiBaseUrl.contains('deepseek.com') ? 'deepseek' : 'openai';
+        }
         final p = (map['renderScriptPath'] ?? '').toString();
         // 只在配置里的路径真实存在时才采用。否则保留 _guessRenderScript()
         // 探测到的 exe 同级 runtime/ —— 这样软件换机器/换目录分发后，
@@ -154,6 +184,8 @@ class SettingsStore {
         if (p.isNotEmpty && File(p).existsSync()) store.renderScriptPath = p;
         store.lastDir = (map['lastDir'] ?? '').toString();
         store.whiteBackground = map['whiteBackground'] as bool? ?? true;
+        store.commandLevels =
+            (map['commandLevels'] ?? '3').toString() == '2' ? '2' : '3';
         store.outputDir = (map['outputDir'] ?? '').toString();
         store.mode = (map['mode'] as num?)?.toInt() ?? 0;
         store.emitJson = map['emitJson'] as bool? ?? true;
@@ -183,6 +215,7 @@ class SettingsStore {
       // 配置损坏就用默认值，不阻塞启动——但必须留痕，否则用户"设置总是不生效"查不出来
       AppLogger.instance.warn('config', '读取 config.json 失败，使用默认值: $e');
     }
+    if (envBase.isNotEmpty) store.apiBaseUrl = envBase;
     return store;
   }
 
@@ -214,10 +247,13 @@ class SettingsStore {
       await _file.writeAsString(
         jsonEncode({
           'apiKey': storedApiKey,
+          'apiBaseUrl': apiBaseUrl,
+          'providerType': providerType,
           'model': model,
           'renderScriptPath': renderScriptPath,
           'lastDir': lastDir,
           'whiteBackground': whiteBackground,
+          'commandLevels': commandLevels,
           'outputDir': outputDir,
           'mode': mode,
           'emitJson': emitJson,

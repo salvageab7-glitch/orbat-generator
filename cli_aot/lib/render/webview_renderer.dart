@@ -18,7 +18,6 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -72,6 +71,7 @@ class WebViewRenderer {
       String? png,
       String? svg,
       String? error,
+      RenderQuality? quality,
     }) {
       return RenderResult(
         ok: ok,
@@ -79,6 +79,7 @@ class WebViewRenderer {
         svgPath: svg,
         error: error,
         elapsed: sw.elapsed,
+        quality: quality,
       );
     }
 
@@ -90,8 +91,11 @@ class WebViewRenderer {
               .toString();
     } catch (_) {}
 
-    Future<bool> evalBool(String expr, {Duration? timeout, Duration step = const Duration(milliseconds: 500)}) async {
-      final deadline = DateTime.now().add(timeout ?? const Duration(seconds: 10));
+    Future<bool> evalBool(String expr,
+        {Duration? timeout,
+        Duration step = const Duration(milliseconds: 500)}) async {
+      final deadline =
+          DateTime.now().add(timeout ?? const Duration(seconds: 10));
       while (DateTime.now().isBefore(deadline)) {
         try {
           final r = await controller.runJavaScriptReturningResult(expr);
@@ -160,11 +164,13 @@ class WebViewRenderer {
               return false;
             }
           })()
-        ''', timeout: const Duration(seconds: 15), step: const Duration(seconds: 1));
+        ''',
+            timeout: const Duration(seconds: 15),
+            step: const Duration(seconds: 1));
         if (!injected) {
           try {
-            final err = await controller.runJavaScriptReturningResult(
-                'window.__orbatErr || "null"');
+            final err = await controller
+                .runJavaScriptReturningResult('window.__orbatErr || "null"');
             injectErr = '模拟文件选择未生效: $err';
           } catch (_) {
             injectErr = '模拟文件选择未生效';
@@ -256,7 +262,7 @@ class WebViewRenderer {
       if (svgOut.length > 100) {
         log('[stage] 导出 SVG');
         svgPath = '${job.outputBase}.svg';
-        await File(svgPath).writeAsString(svgOut, encoding: utf8, flush: true);
+        await writeStringAtomic(svgPath, svgOut);
         log('SVG_FILE $svgPath');
       } else {
         log('[svg] SVG 内容过短，跳过导出');
@@ -304,8 +310,7 @@ class WebViewRenderer {
       ''');
 
       Object? pngVal;
-      final pngDeadline =
-          DateTime.now().add(const Duration(seconds: 60));
+      final pngDeadline = DateTime.now().add(const Duration(seconds: 60));
       while (DateTime.now().isBefore(pngDeadline)) {
         await Future<void>.delayed(const Duration(milliseconds: 500));
         try {
@@ -315,7 +320,8 @@ class WebViewRenderer {
           continue;
         }
         final s = pngVal?.toString() ?? '';
-        if (s.isNotEmpty && s != 'pending' && s != 'null' && s != 'undefined') break;
+        if (s.isNotEmpty && s != 'pending' && s != 'null' && s != 'undefined')
+          break;
       }
       final pngDataUrl = pngVal?.toString() ?? '';
       if (pngDataUrl.isEmpty ||
@@ -324,8 +330,8 @@ class WebViewRenderer {
           !pngDataUrl.startsWith('data:image/png')) {
         String? extra;
         try {
-          final err = await controller.runJavaScriptReturningResult(
-              'window.__orbatErr || "null"');
+          final err = await controller
+              .runJavaScriptReturningResult('window.__orbatErr || "null"');
           extra = _unwrap(err)?.toString();
         } catch (_) {}
         return finish(
@@ -334,19 +340,29 @@ class WebViewRenderer {
         );
       }
       final b64 = pngDataUrl.split(',')[1];
-      final pngPath = '${job.outputBase}.png';
-      await File(pngPath).writeAsBytes(
-        base64.decode(b64),
-        flush: true,
+      final List<int> pngBytes = base64.decode(b64);
+      final RenderQuality quality = inspectPngQuality(
+        pngBytes,
+        whiteBackground: job.whiteBackground,
       );
-      final pngFile = File(pngPath);
-      if (pngFile.lengthSync() == 0) {
-        return finish(ok: false, error: 'PNG 未生成或为空: $pngPath');
+      if (!quality.ok) {
+        return finish(
+          ok: false,
+          error: 'PNG 质量检查失败：${quality.detail}',
+          quality: quality,
+        );
       }
+      final pngPath = '${job.outputBase}.png';
+      await writeBytesAtomic(pngPath, pngBytes);
       log('PNG_FILE $pngPath $w"x"$h @${job.scale}x = '
           '${w * job.scale}x${h * job.scale}');
       log('[stage] 完成');
-      return finish(ok: true, png: pngPath, svg: svgPath);
+      return finish(
+        ok: true,
+        png: pngPath,
+        svg: svgPath,
+        quality: quality,
+      );
     } catch (e) {
       log('[client] 异常: $e');
       return finish(ok: false, error: '出图异常：$e');

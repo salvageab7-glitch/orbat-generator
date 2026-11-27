@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 
@@ -15,6 +16,82 @@ import 'services/settings_store.dart';
 /// 持有引用防止 ServerSocket 被 GC 回收后关闭端口锁（仅赋值不读取，忽略 lint）。
 // ignore: unused_element
 ServerSocket? _instanceLock;
+
+/// 全局导航 key：供未捕获异常处理器在任意位置弹出提示。
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+
+bool _fatalDialogVisible = false;
+DateTime? _lastFatalDialogAt;
+
+/// 安装全局异常兜底：日志 + 一次性提示，不吞掉原始 Flutter 错误处理。
+void _installGlobalErrorHandlers() {
+  final void Function(FlutterErrorDetails)? original = FlutterError.onError;
+  FlutterError.onError = (FlutterErrorDetails details) {
+    AppLogger.instance.error(
+      'flutter',
+      '未捕获异常: ${details.exception}',
+      details.exception,
+      details.stack,
+    );
+    try {
+      _showFatalError(details.exception);
+    } catch (_) {}
+    original?.call(details);
+  };
+
+  PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
+    AppLogger.instance.error('platform', '未捕获异常: $error', error, stack);
+    try {
+      _showFatalError(error);
+    } catch (_) {}
+    return true;
+  };
+}
+
+void _showFatalError(Object error) {
+  final DateTime now = DateTime.now();
+  if (_fatalDialogVisible) return;
+  final DateTime? last = _lastFatalDialogAt;
+  if (last != null && now.difference(last) < const Duration(seconds: 3)) {
+    return;
+  }
+  final BuildContext? context = navigatorKey.currentContext;
+  if (context == null) return;
+
+  _fatalDialogVisible = true;
+  _lastFatalDialogAt = now;
+  final String logPath = AppLogger.instance.currentLogPath ?? '（日志不可用）';
+  Future<void>(() async {
+    try {
+      if (!context.mounted) {
+        _fatalDialogVisible = false;
+        return;
+      }
+      await showDialog<void>(
+        context: context,
+        builder: (BuildContext dialogContext) => AlertDialog(
+          title: Text(tr('出错了')),
+          content: Text('${_shortError(error)}\n\n${tr('日志')}: $logPath'),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: Text(tr('知道了')),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      AppLogger.instance.error('fatal-ui', '显示错误提示失败: $e');
+    } finally {
+      _fatalDialogVisible = false;
+    }
+  });
+}
+
+String _shortError(Object error) {
+  final String s = error.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
+  return s.length > 200 ? '${s.substring(0, 200)}…' : s;
+}
 
 Future<bool> _acquireSingleInstanceLock() async {
   for (final port in [47821, 47822, 47823]) {
@@ -52,6 +129,7 @@ Future<void> main(List<String> args) async {
     } catch (_) {}
   }
   await AppLogger.instance.init();
+  _installGlobalErrorHandlers();
 
   // 单实例检查：同一时间只允许一个程序。
   // 命令行自动任务（--generate/--render）在已有实例时静默退出，
@@ -70,6 +148,12 @@ Future<void> main(List<String> args) async {
 
   AppLogger.instance.info('app', '应用启动 | args=$args');
   final settings = await SettingsStore.load();
+  // Android 不支持模式二（软件+CLI）；旧配置回退到模式一。
+  if (Platform.isAndroid && settings.mode == 1) {
+    settings.mode = 0;
+    await settings.save();
+    AppLogger.instance.info('app', 'Android 不支持模式二，已回退到模式一');
+  }
   // 安卓端：输出目录默认用「输出文件存档」，落应用数据根 files/（同上反推，
   // 稳定可写；外部私有目录在本机不可用，公共目录需权限——统一走应用私有）
   if (Platform.isAndroid &&
@@ -90,9 +174,10 @@ Future<void> main(List<String> args) async {
   // 界面语言：'zh'/'en'，空 = 跟随系统
   L10n.apply(settings.language);
   AppLogger.instance.info(
-      'app',
-      '配置加载完成 | model=${settings.model} '
-          '| key=${AppLogger.keyFingerprint(settings.apiKey)}');
+    'app',
+    '配置加载完成 | model=${settings.model} '
+        '| key=${AppLogger.keyFingerprint(settings.apiKey)}',
+  );
   // 支持 `启动.exe <某编制.json>` 直接打开；`<某图片.png> --generate` 直接识图
   final jsonArg = args.where((a) => !a.startsWith('--')).toList();
   // split('.').last 返回的是不带点的扩展名（jpg），列表也必须用不带点的形式
@@ -108,16 +193,19 @@ Future<void> main(List<String> args) async {
   final autoGenerate = args.contains('--generate');
   final imageArg = pathExists && isImage ? jsonArg.first : null;
   AppLogger.instance.info(
-      'app',
-      '命令行参数解析: jsonArg=$jsonArg, initialJson=$initialJson, '
-          'initialImage=$imageArg, autoRender=$autoRender, autoGenerate=$autoGenerate');
-  runApp(OrbatApp(
-    settings: settings,
-    initialJsonPath: initialJson,
-    autoRender: autoRender,
-    initialImagePath: imageArg,
-    autoGenerate: autoGenerate,
-  ));
+    'app',
+    '命令行参数解析: jsonArg=$jsonArg, initialJson=$initialJson, '
+        'initialImage=$imageArg, autoRender=$autoRender, autoGenerate=$autoGenerate',
+  );
+  runApp(
+    OrbatApp(
+      settings: settings,
+      initialJsonPath: initialJson,
+      autoRender: autoRender,
+      initialImagePath: imageArg,
+      autoGenerate: autoGenerate,
+    ),
+  );
 }
 
 class OrbatApp extends StatefulWidget {
@@ -139,54 +227,80 @@ class OrbatApp extends StatefulWidget {
   State<OrbatApp> createState() => _OrbatAppState();
 }
 
+// 统一字体：微软雅黑。系统自带、零体积，中文和西文（含俄文字母、数字）字重一致，
+// 避免默认 Segoe UI 在中文回退时出现行高与字形跳变。
+const _uiFont = 'Microsoft YaHei';
+const _fontFallback = <String>['Microsoft YaHei', 'Segoe UI', 'SimSun'];
+const _seed = Color(0xFF2E6BE6);
+
+final ThemeData _lightTheme = ThemeData(
+  fontFamily: _uiFont,
+  fontFamilyFallback: _fontFallback,
+  colorScheme: ColorScheme.fromSeed(
+    seedColor: _seed,
+    brightness: Brightness.light,
+  ),
+  useMaterial3: true,
+);
+
+final ThemeData _darkTheme = ThemeData(
+  fontFamily: _uiFont,
+  fontFamilyFallback: _fontFallback,
+  colorScheme: ColorScheme.fromSeed(
+    seedColor: _seed,
+    brightness: Brightness.dark,
+  ),
+  useMaterial3: true,
+  scaffoldBackgroundColor: const Color(0xFF15171C),
+);
+
 class _OrbatAppState extends State<OrbatApp> {
   ThemeMode _themeMode = ThemeMode.dark;
+
+  // 缓存 HomePage 实例：主题切换只重建 MaterialApp，不让整个主页随根 setState 重跑 build。
+  // 语言修订号变化时才换新实例，保证界面文字照常刷新。
+  HomePage? _homePage;
+  int _homeRevision = -1;
+
+  HomePage _homeFor(int revision) {
+    if (_homePage == null || _homeRevision != revision) {
+      _homeRevision = revision;
+      _homePage = HomePage(
+        settings: widget.settings,
+        initialJsonPath: widget.initialJsonPath,
+        autoRender: widget.autoRender,
+        initialImagePath: widget.initialImagePath,
+        autoGenerate: widget.autoGenerate,
+        onToggleTheme: _toggleTheme,
+      );
+    }
+    return _homePage!;
+  }
+
+  void _toggleTheme() => setState(() {
+        _themeMode =
+            _themeMode == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
+      });
 
   @override
   Widget build(BuildContext context) {
     // 语言切换时整棵树重建（字典命中即换成英文，漏译回退中文）
     return ValueListenableBuilder<int>(
       valueListenable: l10nRevision,
-      builder: (context, _, __) => _buildApp(L10n.current),
+      builder: (context, revision, __) => _buildApp(L10n.current, revision),
     );
   }
 
-  Widget _buildApp(AppLang lang) {
-    const seed = Color(0xFF2E6BE6);
-    // 统一字体：微软雅黑。系统自带、零体积，中文和西文（含俄文字母、数字）字重一致，
-    // 避免默认 Segoe UI 在中文回退时出现行高与字形跳变。
-    const uiFont = 'Microsoft YaHei';
-    const fontFallback = <String>['Microsoft YaHei', 'Segoe UI', 'SimSun'];
+  Widget _buildApp(AppLang lang, int revision) {
     return MaterialApp(
+      navigatorKey: navigatorKey,
       title: tr('编制图生成器'),
       debugShowCheckedModeBanner: false,
       themeMode: _themeMode,
-      theme: ThemeData(
-        fontFamily: uiFont,
-        fontFamilyFallback: fontFallback,
-        colorScheme:
-            ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.light),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        fontFamily: uiFont,
-        fontFamilyFallback: fontFallback,
-        colorScheme:
-            ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.dark),
-        useMaterial3: true,
-        scaffoldBackgroundColor: const Color(0xFF15171C),
-      ),
-      home: HomePage(
-        settings: widget.settings,
-        initialJsonPath: widget.initialJsonPath,
-        autoRender: widget.autoRender,
-        initialImagePath: widget.initialImagePath,
-        autoGenerate: widget.autoGenerate,
-        onToggleTheme: () => setState(() {
-          _themeMode =
-              _themeMode == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
-        }),
-      ),
+      themeAnimationDuration: Duration.zero,
+      theme: _lightTheme,
+      darkTheme: _darkTheme,
+      home: _homeFor(revision),
     );
   }
 }
@@ -208,11 +322,16 @@ class _AlreadyRunningApp extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.info_outline,
-                  size: 48, color: Theme.of(context).colorScheme.primary),
+              Icon(
+                Icons.info_outline,
+                size: 48,
+                color: Theme.of(context).colorScheme.primary,
+              ),
               const SizedBox(height: 16),
-              Text(tr('编制图生成器已在运行'),
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+              Text(
+                tr('编制图生成器已在运行'),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+              ),
               const SizedBox(height: 8),
               Text(tr('请切换到已打开的窗口。此窗口即将关闭。'), style: TextStyle(fontSize: 13)),
             ],

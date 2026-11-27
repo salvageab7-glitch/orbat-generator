@@ -5,6 +5,8 @@ import 'dart:ui' show FontFeature;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 
 import '../i18n/l10n.dart';
 import 'l10n_ui.dart';
@@ -22,10 +24,11 @@ import '../core/usage_store.dart';
 import '../core/self_check.dart';
 import '../pipeline.dart';
 import '../ai/deepseek_client.dart';
+import '../ai/model_catalog.dart';
 import '../render/renderer.dart';
+import '../render/webview_renderer.dart';
 import '../services/plugin_bridge.dart';
 import '../services/settings_store.dart';
-import 'render_webview_page.dart';
 import 'tree_view.dart';
 
 /// 输入模式：资料为主 / 纯文本
@@ -99,6 +102,9 @@ class _HomePageState extends State<HomePage> {
   final List<String> _renderLog = [];
   Timer? _renderTicker;
   String? _lastRenderLogPath;
+
+  /// Android 出图用的隐藏 WebView：挂在主界面底层，前台只显示进度。
+  WebViewController? _androidRenderController;
 
   @override
   void dispose() {
@@ -214,25 +220,50 @@ class _HomePageState extends State<HomePage> {
     // 安卓端：出图走 WebView 线上渲染（方案 A）。注册到 pipeline 静态 hook，
     // 之后所有 pipeline.render() 调用（含自检冒烟）都会自动分流到这里。
     if (Platform.isAndroid) {
+      final WebViewController controller =
+          WebViewController.fromPlatformCreationParams(
+        AndroidWebViewControllerCreationParams(),
+      )
+            ..setJavaScriptMode(JavaScriptMode.unrestricted)
+            ..setBackgroundColor(Colors.transparent);
+      (controller.platform as AndroidWebViewController)
+        ..setMediaPlaybackRequiresUserGesture(false)
+        ..setOnShowFileSelector((_) async => const []);
+      _androidRenderController = controller;
+
+      // 启动时先落一个明确的 idle（runId=null），避免旧 lastRun 被误判成本次。
+      Future<void>.microtask(() async {
+        try {
+          await PluginBridge.writeStatus({
+            'state': 'idle',
+            'runId': null,
+            'triggerAt': null,
+            'total': 0,
+            'done': 0,
+            'files': <Map<String, dynamic>>[],
+          });
+          await PluginBridge.ensurePromptsCurrent();
+        } catch (_) {}
+      });
+
       OrbatPipeline.androidRenderHook = (normalizedJson, outputBase) async {
-        if (!mounted) {
+        if (!mounted || _androidRenderController == null) {
           return RenderResult(
             ok: false,
             error: '界面已关闭，无法出图',
             elapsed: Duration.zero,
           );
         }
-        final result = await Navigator.of(context).push<RenderResult>(
-          MaterialPageRoute(
-            builder: (_) => RenderWebViewPage(
-              normalizedJson: normalizedJson,
-              outputBase: outputBase,
-              whiteBackground: widget.settings.whiteBackground,
-            ),
+        // WebView 挂在主界面底层，前台只由 _buildRenderProgress 显示进度。
+        return WebViewRenderer.render(
+          _androidRenderController!,
+          WebViewRenderJob(
+            normalizedJson: normalizedJson,
+            outputBase: outputBase,
+            whiteBackground: widget.settings.whiteBackground,
           ),
+          onLog: _onRenderLog,
         );
-        return result ??
-            RenderResult(ok: false, error: '出图被取消', elapsed: Duration.zero);
       };
       // 插件 intent 和启动自动扫描仅在用户明确选择模式三后生效。
       //   am start -a com.orbat.orbat_core.plugin.RUN
@@ -268,17 +299,33 @@ class _HomePageState extends State<HomePage> {
         // 确定性的「打开即处理」：不依赖 intent 残留——只要权限已授且
         // 交接目录有待处理 JSON，打开 App 就自动跑批（手机端 Agent 主路径）
         Timer(const Duration(milliseconds: 800), () async {
-          if (!mounted || _busy || widget.settings.mode != 2) return;
+          if (!mounted) return;
+          if (_busy) {
+            AppLogger.instance.info('plugin', '自动扫描跳过：当前正在处理其他任务');
+            return;
+          }
+          if (widget.settings.mode != 2) {
+            AppLogger.instance.info('plugin', '自动扫描跳过：未选择模式三');
+            return;
+          }
           try {
             final granted = await pluginChannel.invokeMethod<bool>(
               'isManageStorageGranted',
             );
-            if (granted != true) return;
-            PluginBridge.ensureDirs();
-            if ((await PluginBridge.scanInbox()).isNotEmpty) {
-              await _runPluginBridge();
+            if (granted != true) {
+              AppLogger.instance.info('plugin', '自动扫描跳过：存储权限未授予');
+              return;
             }
-          } catch (_) {}
+            PluginBridge.ensureDirs();
+            final pendingFiles = await PluginBridge.scanInbox();
+            if (pendingFiles.isEmpty) {
+              AppLogger.instance.info('plugin', '自动扫描：inbox 无待处理 JSON');
+              return;
+            }
+            await _runPluginBridge();
+          } catch (e) {
+            AppLogger.instance.warn('plugin', '自动扫描失败: $e');
+          }
         });
       });
     }
@@ -446,7 +493,10 @@ class _HomePageState extends State<HomePage> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  tr('三种模式可随时在设置里切换；只有模式一、模式二需要 DeepSeek API Key。'),
+                  tr(
+                    '桌面端三种模式可随时切换；安卓端模式二（软件+CLI）不支持。'
+                    '模式一需要 API Key，模式三不需要。',
+                  ),
                   style: TextStyle(
                     fontSize: 12,
                     color: Theme.of(ctx2).hintColor,
@@ -526,14 +576,18 @@ class _HomePageState extends State<HomePage> {
     int value,
     String title,
     String subtitle,
-  ) =>
-      _pickOption(
-        ctx,
-        () => setD(() => widget.settings.mode = value),
-        widget.settings.mode == value,
-        title,
-        subtitle,
-      );
+  ) {
+    // 安卓端模式二（软件+CLI）不支持：卡片展示但不能选中。
+    final bool enabled = !(Platform.isAndroid && value == 1);
+    return _pickOption(
+      ctx,
+      () => setD(() => widget.settings.mode = value),
+      widget.settings.mode == value,
+      title,
+      subtitle,
+      enabled: enabled,
+    );
+  }
 
   /// 通用单选项卡片：语言、模式共用（只有一处样式，避免两套视觉）
   Widget _pickOption(
@@ -541,56 +595,62 @@ class _HomePageState extends State<HomePage> {
     VoidCallback onTap,
     bool selected,
     String title,
-    String subtitle,
-  ) {
+    String subtitle, {
+    bool enabled = true,
+  }) {
     final scheme = Theme.of(ctx).colorScheme;
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(8),
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: selected ? scheme.primary : Theme.of(ctx).dividerColor,
-              width: selected ? 1.6 : 1,
+      child: Opacity(
+        opacity: enabled ? 1 : 0.55,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: enabled ? onTap : null,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: selected ? scheme.primary : Theme.of(ctx).dividerColor,
+                width: selected ? 1.6 : 1,
+              ),
+              color: selected ? scheme.primary.withValues(alpha: 0.06) : null,
             ),
-            color: selected ? scheme.primary.withValues(alpha: 0.06) : null,
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(
-                selected ? Icons.radio_button_checked : Icons.radio_button_off,
-                size: 18,
-                color: selected ? scheme.primary : Theme.of(ctx).hintColor,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: Theme.of(ctx).hintColor,
-                      ),
-                    ),
-                  ],
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  selected
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_off,
+                  size: 18,
+                  color: selected ? scheme.primary : Theme.of(ctx).hintColor,
                 ),
-              ),
-            ],
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Theme.of(ctx).hintColor,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -634,9 +694,9 @@ class _HomePageState extends State<HomePage> {
         title: Text(tr('先配置 API Key')),
         content: Text(
           tr(
-            '识图功能需要 DeepSeek API Key：\n\n'
-            '1. 在 platform.deepseek.com 注册并创建 API Key；\n'
-            '2. 点下方「打开设置」粘贴 Key；\n'
+            '识图功能需要 OpenAI 兼容 API 的 Key：\n\n'
+            '1. 在 API 提供方（DeepSeek / OpenAI 等）创建 Key；\n'
+            '2. 点下方「打开设置」粘贴 Key，并按需填写 API 地址与模型 id；\n'
             '3. 出图功能不需要 Key，但需要安装 Node.js 24 或更高版本。\n\n'
             '之后可随时在右上角设置里修改。',
           ),
@@ -705,7 +765,7 @@ class _HomePageState extends State<HomePage> {
       _snack(
         widget.settings.mode == 2
             ? tr('模式三由外部 Agent 识图，本软件不配 Key；要在界面识图请切到模式一/二并填写 Key')
-            : tr('请先在右上角设置里填写 DeepSeek API Key'),
+            : tr('请先在右上角设置里填写 API Key'),
       );
       return;
     }
@@ -744,8 +804,10 @@ class _HomePageState extends State<HomePage> {
       apiKey: widget.settings.apiKey.trim(),
       model: widget.settings.model,
       renderScriptPath: widget.settings.renderScriptPath,
+      apiBaseUrl: widget.settings.apiBaseUrl,
       whiteBackground: widget.settings.whiteBackground,
       forceChinese: widget.settings.forceChinese,
+      preferredCommandLevels: widget.settings.commandLevels,
     );
 
     try {
@@ -866,6 +928,7 @@ class _HomePageState extends State<HomePage> {
       _renderElapsed = Duration.zero;
       _renderLog.clear();
       _lastRenderLogPath = null;
+      if (MediaQuery.of(context).size.width < 640) _mobilePane = 2;
     });
 
     final watch = Stopwatch()..start();
@@ -878,8 +941,10 @@ class _HomePageState extends State<HomePage> {
     final pipeline = OrbatPipeline(
       apiKey: widget.settings.apiKey,
       renderScriptPath: widget.settings.renderScriptPath,
+      apiBaseUrl: widget.settings.apiBaseUrl,
       whiteBackground: widget.settings.whiteBackground,
       forceChinese: widget.settings.forceChinese,
+      preferredCommandLevels: widget.settings.commandLevels,
     );
 
     try {
@@ -1013,7 +1078,7 @@ class _HomePageState extends State<HomePage> {
       try {
         await channel.invokeMethod('requestManageStorage');
       } catch (_) {}
-      _snack(tr('请在系统设置允许「所有文件访问」后，返回再点一次「插件处理」'));
+      _snack(tr('请授予存储权限（Android 11+ 为「所有文件访问」）后，返回再点一次「插件处理」'));
       return;
     }
     PluginBridge.ensureDirs();
@@ -1023,61 +1088,125 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     if (_busy) return;
+    _renderTicker?.cancel();
+    final Stopwatch pluginWatch = Stopwatch()..start();
     setState(() {
       _busy = true;
       _stage = tf('插件处理中：{n} 个文件', {'n': files.length});
+      _rendering = true;
+      _renderStageName = '插件处理：准备';
+      _renderProgress = 0.01;
+      _renderElapsed = Duration.zero;
+      _renderLog.clear();
+      if (MediaQuery.of(context).size.width < 640) _mobilePane = 2;
+    });
+    _renderTicker = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      if (!mounted) return;
+      setState(() => _renderElapsed = pluginWatch.elapsed);
     });
     final pipeline = OrbatPipeline(
       apiKey: widget.settings.apiKey,
       renderScriptPath: widget.settings.renderScriptPath,
+      apiBaseUrl: widget.settings.apiBaseUrl,
       whiteBackground: widget.settings.whiteBackground,
       forceChinese: widget.settings.forceChinese,
+      preferredCommandLevels: widget.settings.commandLevels,
     );
     int okCount = 0;
     int renderOk = 0;
-    // 状态信号：Agent 轮询 _status.json 判定开始/进度/完成
+    final String runId = PluginBridge.newRunId();
+    final String triggerAt = DateTime.now().toIso8601String();
+    final List<Map<String, dynamic>> fileSummaries = <Map<String, dynamic>>[];
+    // 状态信号：Agent 根据 runId/state 判断本次，不再被旧 lastRun 误导。
     await PluginBridge.writeStatus({
-      'state': 'running',
+      'state': 'queued',
+      'runId': runId,
+      'triggerAt': triggerAt,
       'total': files.length,
       'done': 0,
-      'startedAt': DateTime.now().toIso8601String(),
+      'files': <Map<String, dynamic>>[],
     });
     try {
       var done = 0;
       for (final f in files) {
+        if (mounted) {
+          setState(() {
+            _renderProgress = 0.01;
+            _renderStageName =
+                '插件处理：${f.path.split(Platform.pathSeparator).last}';
+            _renderLog.clear();
+          });
+        }
         final r = await PluginBridge.processOne(
           f,
           (nj, ob) => pipeline.render(parseTreeJson(nj)!, outputBase: ob),
+          runId: runId,
+          commandLevelsOverride: widget.settings.commandLevels,
         );
         done++;
-        if (r['ok'] == true) okCount++;
-        if (r['render']['ok'] == true) renderOk++;
+        final Map<String, dynamic> renderMap =
+            (r['render'] as Map?)?.cast<String, dynamic>() ??
+                <String, dynamic>{};
+        final Map<String, dynamic> summary = <String, dynamic>{
+          'file': r['file'],
+          'runId': runId,
+          'ok': r['ok'] == true,
+          'red': (r['red'] as List?)?.length ?? 0,
+          'render': renderMap['ok'] == true,
+          'deliverable': r['deliverable'] == true,
+          'png': renderMap['png'],
+          'svg': renderMap['svg'],
+          'report': r['reportPath'],
+        };
+        fileSummaries.add(summary);
+        if (summary['ok'] == true) okCount++;
+        if (summary['deliverable'] == true) renderOk++;
         await PluginBridge.writeStatus({
           'state': 'running',
+          'runId': runId,
+          'triggerAt': triggerAt,
           'total': files.length,
           'done': done,
           'current': r['file'],
+          'files': fileSummaries,
         });
         _appendLog(
           tf('插件处理 {f}：校验{v}，出图{g}', {
             'f': r['file'],
-            'v': r['ok'] == true
+            'v': summary['ok'] == true
                 ? tr('通过（红牌 0）')
-                : '${tr('红牌')} ${(r['red'] as List).length}',
-            'g': r['render']['ok'] == true ? tr('成功') : tr('失败'),
+                : '${tr('红牌')} ${summary['red']}',
+            'g': summary['deliverable'] == true ? tr('可交付') : tr('未交付'),
           }),
         );
       }
       _snack(
-        tf('插件处理完成：{n} 个，校验通过 {ok}，出图成功 {g}，产物在 orbat_outbox', {
+        tf('插件处理完成：{n} 个，校验通过 {ok}，可交付 {g}，产物在 orbat_outbox', {
           'n': files.length,
           'ok': okCount,
           'g': renderOk,
         }),
       );
+      // 有“校验通过但渲染未交付”的文件时，把日志尾部也给 Agent。
+      final bool hasRenderProblem = fileSummaries.any(
+        (Map<String, dynamic> f) => f['ok'] == true && f['deliverable'] != true,
+      );
+      final diag =
+          hasRenderProblem ? await PluginBridge.writeDiagnostics(runId) : null;
       await PluginBridge.writeStatus({
-        'state': 'idle',
+        'state': 'done',
+        'runId': runId,
+        'triggerAt': triggerAt,
+        'finishedAt': DateTime.now().toIso8601String(),
+        'total': files.length,
+        'done': done,
+        'validated': okCount,
+        'rendered': renderOk,
+        'files': fileSummaries,
+        if (diag != null) 'log': diag.path,
+        if (diag != null) 'logTail': diag.tail,
         'lastRun': {
+          'runId': runId,
           'total': files.length,
           'validated': okCount,
           'rendered': renderOk,
@@ -1087,8 +1216,31 @@ class _HomePageState extends State<HomePage> {
     } catch (e) {
       _appendLog('插件处理异常：$e');
       _snack('插件处理异常：$e');
+      final diag = await PluginBridge.writeDiagnostics(runId);
+      try {
+        await PluginBridge.writeStatus({
+          'state': 'failed',
+          'runId': runId,
+          'triggerAt': triggerAt,
+          'finishedAt': DateTime.now().toIso8601String(),
+          'total': files.length,
+          'done': fileSummaries.length,
+          'files': fileSummaries,
+          'error': '$e',
+          if (diag != null) 'log': diag.path,
+          if (diag != null) 'logTail': diag.tail,
+        });
+      } catch (_) {}
     } finally {
-      if (mounted) setState(() => _busy = false);
+      _renderTicker?.cancel();
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _rendering = false;
+          _renderProgress = 0;
+          _renderStageName = '准备';
+        });
+      }
     }
   }
 
@@ -1671,6 +1823,127 @@ class _HomePageState extends State<HomePage> {
     return '${(n / 1000000).toStringAsFixed(2)}M';
   }
 
+  /// 安卓自检：用随包发布的测试 JSON 验证「结构解析 → 隐藏 WebView 出图 → 删除测试图」。
+  Future<CheckItem> _runBundledSmoke() async {
+    final String name = tr('内置样例结构 + 出图');
+    Directory? tmp;
+    try {
+      final String raw = await rootBundle.loadString(
+        'assets/test/smoke_orbat.json',
+      );
+      final OrbatNode? tree = parseTreeJson(raw);
+      if (tree == null) {
+        return CheckItem(
+          name: name,
+          ok: false,
+          detail: tr('内置样例 JSON 无法解析'),
+          fix: tr('检查 assets/test/smoke_orbat.json 是否随包发布'),
+        );
+      }
+      final report = OrbatValidator.validate(tree);
+      if (!report.ok) {
+        return CheckItem(
+          name: name,
+          ok: false,
+          detail: tf('内置样例结构红牌 {n} 项', {'n': report.redCount}),
+          fix: tr('检查内置样例 JSON 的 SIDC/层级'),
+        );
+      }
+      final String normalized = normalizeTreeJson(
+        tree,
+        commandLevels: '1',
+        adaptForRender: true,
+      );
+      final hook = OrbatPipeline.androidRenderHook;
+      if (hook == null) {
+        return CheckItem(
+          name: name,
+          ok: false,
+          detail: tr('安卓渲染器未初始化'),
+          fix: tr('重启应用后重试'),
+        );
+      }
+
+      tmp = await Directory.systemTemp.createTemp('orbat_bundled_smoke_');
+      final String outBase = '${tmp.path}${Platform.pathSeparator}smoke';
+
+      final Stopwatch watch = Stopwatch()..start();
+      _renderTicker?.cancel();
+      setState(() {
+        _rendering = true;
+        _renderStageName = '内置样例：准备';
+        _renderProgress = 0.01;
+        _renderElapsed = Duration.zero;
+        _renderLog.clear();
+        _lastRenderLogPath = null;
+        if (MediaQuery.of(context).size.width < 640) _mobilePane = 2;
+      });
+      _renderTicker = Timer.periodic(const Duration(milliseconds: 250), (_) {
+        if (!mounted) return;
+        setState(() => _renderElapsed = watch.elapsed);
+      });
+
+      final RenderResult result = await hook(normalized, outBase);
+      _renderTicker?.cancel();
+
+      if (!result.ok) {
+        return CheckItem(
+          name: name,
+          ok: false,
+          detail: tr('出图失败：${result.error ?? "未知错误"}'),
+          fix: tr('检查网络到 spatialillusions.com，或稍后重试'),
+        );
+      }
+      final String? pngPath = result.pngPath;
+      if (pngPath == null || !File(pngPath).existsSync()) {
+        return CheckItem(
+          name: name,
+          ok: false,
+          detail: tr('PNG 未生成'),
+          fix: tr('查看运行日志中的渲染阶段'),
+        );
+      }
+      final List<int> pngBytes = File(pngPath).readAsBytesSync();
+      if (!isValidPngBytes(pngBytes)) {
+        return CheckItem(
+          name: name,
+          ok: false,
+          detail: tr('PNG 校验失败（文件不完整）'),
+          fix: tr('重跑环境自检；仍失败请查看日志'),
+        );
+      }
+      final int kb = (pngBytes.length / 1024).round();
+      return CheckItem(
+        name: name,
+        ok: true,
+        detail: tf(
+          '{n} 节点 / 深度 {d}；PNG {kb}KB（测试图已自动删除）',
+          {'n': tree.count, 'd': tree.maxDepth, 'kb': kb},
+        ),
+      );
+    } catch (e) {
+      return CheckItem(
+        name: name,
+        ok: false,
+        detail: '异常：$e',
+        fix: tr('检查网络、WebView 与内置测试资源'),
+      );
+    } finally {
+      _renderTicker?.cancel();
+      if (mounted) {
+        setState(() {
+          _rendering = false;
+          _renderProgress = 0;
+          _renderStageName = '准备';
+        });
+      }
+      // 测试产物只用于本次自检，结束即删除（PNG/SVG/归一化 JSON 全在 tmp 下）。
+      try {
+        if (tmp != null && tmp.existsSync()) tmp.deleteSync(recursive: true);
+      } catch (_) {}
+    }
+  }
+
   /// 一键环境自检
   ///
   /// [markFirstRun] 首次启动自动跑时为 true：跑完记一个标记，以后不再自动弹。
@@ -1680,11 +1953,13 @@ class _HomePageState extends State<HomePage> {
     try {
       result = await SelfCheck.run(
         renderScriptPath: widget.settings.renderScriptPath,
+        apiBaseUrl: widget.settings.apiBaseUrl,
         apiKey: widget.settings.apiKey,
         // 真渲染一次（约 15-25 秒）：把"能不能出图"从猜测变成结论
         smokeRender: true,
         outputDir: outputDir,
         mode: widget.settings.mode,
+        androidSmoke: Platform.isAndroid ? _runBundledSmoke : null,
       );
     } catch (e) {
       _snack('自检失败：$e');
@@ -1791,11 +2066,18 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _openSettings() async {
     final keyCtrl = TextEditingController(text: widget.settings.apiKey);
+    final baseCtrl = TextEditingController(text: widget.settings.apiBaseUrl);
     final scriptCtrl = TextEditingController(
       text: widget.settings.renderScriptPath,
     );
     final modelCtrl = TextEditingController(text: widget.settings.model);
     int modeVal = widget.settings.mode;
+    String levelVal = widget.settings.commandLevels == '2' ? '2' : '3';
+    String providerVal =
+        widget.settings.providerType == 'openai' ? 'openai' : 'deepseek';
+    List<ApiModelInfo> modelOptions = const [];
+    bool loadingModels = false;
+    String? modelError;
     const modeNames = [
       '模式一 · 纯软件',
       '模式二 · 软件+CLI(配API)',
@@ -1853,17 +2135,75 @@ class _HomePageState extends State<HomePage> {
                     },
                   ),
                   const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: providerVal,
+                    isExpanded: true,
+                    decoration: InputDecoration(
+                      labelText: tr('服务类型'),
+                      helperText: tr(
+                        'DeepSeek 使用官方预设；OpenAI 兼容可填任意 /v1 地址（含 OpenCode Go）。',
+                      ),
+                      helperMaxLines: 3,
+                      border: const OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'deepseek',
+                        child: Text('DeepSeek'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'openai',
+                        child: Text('OpenAI 兼容 / OpenCode Go'),
+                      ),
+                    ],
+                    onChanged: (v) {
+                      if (v == null) return;
+                      setDlgState(() {
+                        providerVal = v;
+                        modelOptions = const [];
+                        modelError = null;
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: levelVal,
+                    isExpanded: true,
+                    decoration: InputDecoration(
+                      labelText: tr('指挥层级 commandLevels'),
+                      helperText: tr(
+                        '默认 3（推荐，排布更紧凑）；2 仅用于特殊宽树，可能反而更宽。会覆盖 JSON 根节点的设置。',
+                      ),
+                      helperMaxLines: 3,
+                      border: const OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: '3',
+                        child: Text('3 · 默认（推荐）'),
+                      ),
+                      DropdownMenuItem(
+                        value: '2',
+                        child: Text('2 · 特殊宽树'),
+                      ),
+                    ],
+                    onChanged: (v) {
+                      if (v == null) return;
+                      setDlgState(() => levelVal = v);
+                    },
+                  ),
+                  const SizedBox(height: 12),
                   TextField(
                     controller: keyCtrl,
                     obscureText: true,
-                    // 模式三（Agent 全权）不需要软件 API：灰化且禁止编辑
-                    enabled: modeVal != 2,
+                    // 模式三不调用本软件 API，但允许预先配置，切到模式一/二后生效
+                    enabled: true,
                     decoration: InputDecoration(
-                      labelText: 'DeepSeek API Key',
+                      labelText: 'API Key（OpenAI / DeepSeek）',
                       hintText: 'sk-...',
                       helperText: tr(
                         modeVal == 2
-                            ? '模式三由 AI Agent 调用自己的 API，本软件不需要 Key'
+                            ? '模式三不调用本软件 API；可预先配置，切到模式一/二后生效'
                             : '仅存于本机配置文件（DPAPI / 混淆存储）',
                       ),
                       helperMaxLines: 3,
@@ -1871,56 +2211,208 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  DropdownButtonFormField<String>(
-                    initialValue:
-                        SettingsStore.knownModels.containsKey(modelCtrl.text)
-                            ? modelCtrl.text
-                            : null,
-                    isExpanded: true,
-                    // 模式三灰化：模型由 Agent 决定，软件不调 API
-                    disabledHint: Text(tr('模式三由 Agent 决定模型')),
+                  TextField(
+                    controller: baseCtrl,
+                    enabled: true,
+                    keyboardType: TextInputType.url,
                     decoration: InputDecoration(
-                      labelText: tr('识图模型'),
+                      labelText: providerVal == 'deepseek'
+                          ? tr('API 地址（DeepSeek）')
+                          : tr('API 地址（OpenAI 兼容）'),
+                      hintText:
+                          'https://api.deepseek.com 或 https://api.openai.com/v1',
                       helperText: tr(
-                        modeVal == 2
-                            ? '模式三不使用本软件的识图模型'
-                            : '任选预设，也可在下方手填自定义模型 id',
+                        '填到 /v1 为止；也接受完整 /chat/completions。DeepSeek 留默认即可。',
                       ),
                       helperMaxLines: 3,
                       border: const OutlineInputBorder(),
                     ),
-                    items: [
-                      ...SettingsStore.knownModels.entries.map(
-                        (e) => DropdownMenuItem(
-                          value: e.key,
-                          child: Text(e.value),
+                  ),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    children: [
+                      ActionChip(
+                        label: const Text('DeepSeek'),
+                        onPressed: () => setDlgState(
+                          () => baseCtrl.text = 'https://api.deepseek.com',
                         ),
                       ),
-                      DropdownMenuItem(
-                        value: '__custom__',
-                        child: Text(tr('自定义…')),
+                      ActionChip(
+                        label: const Text('OpenAI'),
+                        onPressed: () => setDlgState(
+                          () => baseCtrl.text = 'https://api.openai.com/v1',
+                        ),
+                      ),
+                      ActionChip(
+                        label: const Text('OpenCode Go'),
+                        onPressed: () => setDlgState(() {
+                          baseCtrl.text = 'https://opencode.ai/zen/go/v1';
+                          providerVal = 'openai';
+                          modelOptions = const [];
+                          modelError = null;
+                        }),
                       ),
                     ],
-                    onChanged: modeVal == 2
-                        ? null
-                        : (v) {
-                            if (v == null) return;
-                            if (v == '__custom__') {
-                              modelCtrl.clear();
-                            } else {
-                              modelCtrl.text = v;
-                            }
-                            setDlgState(() {});
-                          },
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 12),
+                  if (providerVal == 'deepseek') ...[
+                    DropdownButtonFormField<String>(
+                      initialValue:
+                          SettingsStore.knownModels.containsKey(modelCtrl.text)
+                              ? modelCtrl.text
+                              : null,
+                      isExpanded: true,
+                      decoration: InputDecoration(
+                        labelText: tr('识图模型'),
+                        helperText: tr(
+                          modeVal == 2
+                              ? '模式三不调用本软件模型；可预先配置'
+                              : '需与 API 地址匹配；可手填自定义模型 id',
+                        ),
+                        helperMaxLines: 3,
+                        border: const OutlineInputBorder(),
+                      ),
+                      items: [
+                        ...SettingsStore.knownModels.entries.map(
+                          (e) => DropdownMenuItem(
+                            value: e.key,
+                            child: Text(e.value),
+                          ),
+                        ),
+                        DropdownMenuItem(
+                          value: '__custom__',
+                          child: Text(tr('自定义…')),
+                        ),
+                      ],
+                      onChanged: (v) {
+                        if (v == null) return;
+                        if (v == '__custom__') {
+                          modelCtrl.clear();
+                        } else {
+                          modelCtrl.text = v;
+                        }
+                        setDlgState(() {});
+                      },
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                  if (providerVal == 'openai') ...[
+                    OutlinedButton.icon(
+                      onPressed: loadingModels
+                          ? null
+                          : () async {
+                              final base = baseCtrl.text.trim();
+                              final key = keyCtrl.text.trim();
+                              if (base.isEmpty || key.isEmpty) {
+                                setDlgState(
+                                  () => modelError = '请先填写 API 地址和 API Key',
+                                );
+                                return;
+                              }
+                              setDlgState(() {
+                                loadingModels = true;
+                                modelError = null;
+                              });
+                              final result = await fetchApiModels(
+                                apiBaseUrl: base,
+                                apiKey: key,
+                              );
+                              if (!ctx.mounted) return;
+                              setDlgState(() {
+                                loadingModels = false;
+                                modelOptions = result.models;
+                                modelError = result.error ?? result.warning;
+                                if (result.models.isNotEmpty) {
+                                  final ids =
+                                      result.models.map((m) => m.id).toSet();
+                                  if (!ids.contains(modelCtrl.text)) {
+                                    final vision = result.models
+                                        .where((m) => m.vision)
+                                        .toList();
+                                    modelCtrl.text =
+                                        (_inputMode == InputMode.material &&
+                                                vision.isNotEmpty)
+                                            ? vision.first.id
+                                            : result.models.first.id;
+                                  }
+                                }
+                              });
+                            },
+                      icon: loadingModels
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.download_outlined, size: 16),
+                      label: Text(loadingModels ? tr('读取中…') : tr('读取模型列表')),
+                    ),
+                    if (loadingModels) ...[
+                      const SizedBox(height: 4),
+                      const LinearProgressIndicator(minHeight: 2),
+                    ],
+                    if (modelError != null) ...[
+                      const SizedBox(height: 4),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          modelError!,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Theme.of(ctx).colorScheme.error,
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (modelOptions.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      DropdownButtonFormField<String>(
+                        key: ValueKey(
+                          'api-models-${modelOptions.length}-${modelCtrl.text}',
+                        ),
+                        initialValue:
+                            modelOptions.any((m) => m.id == modelCtrl.text)
+                                ? modelCtrl.text
+                                : null,
+                        isExpanded: true,
+                        decoration: InputDecoration(
+                          labelText: tr('可用模型'),
+                          helperText:
+                              tr('来自 API 的 /models；标注 vision 的模型支持图片输入'),
+                          helperMaxLines: 2,
+                          border: const OutlineInputBorder(),
+                        ),
+                        items: [
+                          for (final m in modelOptions)
+                            DropdownMenuItem(
+                              value: m.id,
+                              child: Text(
+                                m.displayName,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                        onChanged: (v) {
+                          if (v == null) return;
+                          setDlgState(() => modelCtrl.text = v);
+                        },
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                  ],
                   TextField(
                     controller: modelCtrl,
-                    enabled: modeVal != 2,
+                    enabled: true,
                     decoration: InputDecoration(
-                      labelText: tr('模型 id（可手填）'),
-                      hintText: 'deepseek-flash',
-                      helperText: modeVal == 2 ? tr('模式三不使用本软件的识图模型') : null,
+                      labelText: providerVal == 'deepseek'
+                          ? tr('模型 id（可手填）')
+                          : tr('模型 id（可手填，列表失败时用）'),
+                      hintText: providerVal == 'deepseek'
+                          ? 'deepseek-flash'
+                          : '例如 deepseek-v4.1-flash',
+                      helperText: modeVal == 2 ? tr('模式三不调用本软件模型；可预先配置') : null,
                       border: const OutlineInputBorder(),
                     ),
                   ),
@@ -2022,6 +2514,17 @@ class _HomePageState extends State<HomePage> {
                       ),
                     ],
                   ),
+                  const Divider(height: 24),
+                  Align(
+                    alignment: Alignment.center,
+                    child: Text(
+                      '${tr('软件版本')} v$kAppVersion',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Theme.of(ctx).hintColor,
+                      ),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -2034,11 +2537,25 @@ class _HomePageState extends State<HomePage> {
             FilledButton(
               onPressed: () async {
                 widget.settings.apiKey = keyCtrl.text.trim();
+                final base = baseCtrl.text.trim();
+                widget.settings.apiBaseUrl =
+                    base.isEmpty ? SettingsStore.defaultApiBaseUrl : base;
+                widget.settings.providerType = providerVal;
                 widget.settings.renderScriptPath = scriptCtrl.text.trim();
-                widget.settings.model = modelCtrl.text.trim().isEmpty
-                    ? 'deepseek-flash'
-                    : modelCtrl.text.trim();
+                final model = modelCtrl.text.trim();
+                if (providerVal == 'openai' && model.isEmpty) {
+                  setDlgState(
+                    () => modelError = '请先读取模型列表或手填模型 id',
+                  );
+                  return;
+                }
+                widget.settings.model = model.isEmpty
+                    ? (providerVal == 'deepseek'
+                        ? SettingsStore.defaultDeepSeekModel
+                        : '')
+                    : model;
                 widget.settings.mode = modeVal;
+                widget.settings.commandLevels = levelVal;
                 await widget.settings.save();
                 if (ctx.mounted) Navigator.pop(ctx);
                 _appendLog('设置已保存');
@@ -2050,6 +2567,7 @@ class _HomePageState extends State<HomePage> {
       ),
     );
     keyCtrl.dispose();
+    baseCtrl.dispose();
     scriptCtrl.dispose();
   }
 
@@ -2060,7 +2578,7 @@ class _HomePageState extends State<HomePage> {
     final theme = Theme.of(context);
     // 窄屏（手机竖屏）：三面板并排放不下，改「分段切换」+ AppBar 收纳
     final narrow = MediaQuery.of(context).size.width < 640;
-    return Scaffold(
+    final Widget content = Scaffold(
       appBar: AppBar(
         title: Row(
           children: [
@@ -2136,6 +2654,19 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
       bottomNavigationBar: _buildStatusBar(theme),
+    );
+
+    if (!Platform.isAndroid || _androidRenderController == null) return content;
+    // WebView 必须在树上才能执行 JS；放在最底层，被不透明的 Scaffold 完全遮住。
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: IgnorePointer(
+            child: WebViewWidget(controller: _androidRenderController!),
+          ),
+        ),
+        content,
+      ],
     );
   }
 
@@ -2666,8 +3197,10 @@ class _HomePageState extends State<HomePage> {
       apiKey: settings.apiKey.trim(),
       model: settings.model,
       renderScriptPath: settings.renderScriptPath,
+      apiBaseUrl: settings.apiBaseUrl,
       whiteBackground: settings.whiteBackground,
       forceChinese: settings.forceChinese,
+      preferredCommandLevels: settings.commandLevels,
     );
 
     final img = File(task.sourcePath);

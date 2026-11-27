@@ -1,6 +1,6 @@
 # ORBAT CLI adapter protocol
 
-Version: ORBAT Generator `0.3.6`; CLI protocol `1`; current implementation target: Windows x64.
+Version: ORBAT Generator `0.3.7-beta`; CLI protocol `1`; current implementation target: Windows x64.
 
 This document is the stable seam between the ORBAT CLI/runtime and agent hosts. A host does not need DSH: validate and normalize JSON with the CLI using explicit argument vectors, parse one JSON object from stdout, then pass normalized JSON to the included Node renderer scripts. Implement your own managed-process lifetime and file-delivery behavior. Do not build a shell command string.
 
@@ -28,12 +28,24 @@ orbat-cli.exe --version
 Returns one JSON envelope:
 
 ```json
-{"ok":true,"command":"version","data":{"version":"0.3.6","protocol":1}}
+{"ok":true,"command":"version","data":{"version":"0.3.7-beta","protocol":1}}
 ```
 
 `config` also exposes `data.version` and `data.protocol`, so a host can check compatibility without a separate process. `protocol` increments only when the envelope or field semantics change.
 
 ## Commands
+
+### Logs and error reports
+
+```text
+orbat-cli.exe logs
+orbat-cli.exe logs --tail
+orbat-cli.exe logs --errors
+```
+
+Returns the log locations. Normal logs live under `%APPDATA%\OrbatGenerator\orbat-logs\` (`app-YYYY-MM-DD.log`), are rotated at 5 MiB and kept for **14 days**. Error reports live separately under `%APPDATA%\OrbatGenerator\orbat-error-reports\` and are **not** auto-deleted. `--tail` adds up to the last 80 normal-log lines; `--errors` lists existing error reports (newest first).
+
+Every successful envelope also carries `data.logs` with `normalDir`, `normalCurrent`, `normalKeepDays`, `errorDir`, and `errorRetention`. Every failure envelope adds a top-level `errorReport` path. The report contains the time, platform, working directory, command tag, message, optional stack, and the normal-log tail, so an agent can read one file instead of app-private internals.
 
 ### Validate
 
@@ -92,6 +104,41 @@ node.exe runtime/render_orbat.js <normalized-input.json> <output-base>
 The DSH adapter first calls `normalize <input.json> --adapt-for-render`, saves `data.json` as `<normalized-input.json>`, then launches Node directly. The renderer writes `<output-base>.png` and `<output-base>.svg`; its stdout/stderr are diagnostic streams, not a JSON envelope. A host must check for process exit code `0`, then verify both files are regular, non-empty, size-bounded, and under its per-run output directory before presenting them. Keep the AOT `render` command for other environments only after verifying its browser process chain there.
 
 The DSH adapter runs `validate`, then `normalize --adapt-for-render`, and does not start the renderer if red issues remain. Other hosts should use the same rule unless the user explicitly chooses a different policy.
+
+### Validate-only
+
+```text
+orbat-cli.exe render --in <input.json> --validate-only
+```
+
+Parses and validates without starting a browser and without writing PNG/SVG. The envelope keeps the validate fields (`redCount/warnCount/ok/issues`) and reports `render.skipped=true, reason="validate-only"`. Exit `3` means red issues; `0` means clean. Use this for fast agent iteration.
+
+### Large-image layout
+
+```text
+orbat-cli.exe render --in <input.json> --out <base> --max-width 4096
+```
+
+After a successful render, if PNG width exceeds `--max-width` (default 4096), the CLI tries once more with `commandLevels:"2"`, compares widths, and keeps the narrower result. If it is still too wide, it proportionally downscales the PNG to `--max-width` (still one whole image, no pagination). `data.layout` records `commandLevelsInput`, `commandLevelsOutput`, `width`, `height`, `strategy` (`default`/`commandLevels2`/`keep-3`/`downscale`), optional `scale`, and `warning: "建议桌面查看"` when still too wide.
+
+### Batch rescan
+
+```text
+orbat-cli.exe batch --dir <images> --out-dir <dir>
+orbat-cli.exe batch --dir <images> --validate-only
+orbat-cli.exe batch --dir <images> --no-rescan
+```
+
+After the initial batch, the CLI rescans the input directory up to two more passes and serially processes images added while the batch was running. Files are deduplicated by absolute path; `data.rescanPasses` records how many extra passes ran. `--no-rescan` disables this. `--validate-only` still runs image recognition (AI key required) and writes the JSON, but skips rendering and reports `render.skipped=true, reason="validate-only"`.
+
+### JSON Schema
+
+```text
+orbat-cli.exe schema
+orbat-cli.exe schema --out orbat.schema.json
+```
+
+Emits or writes the structural contract (`schema/orbat.schema.json`). It covers the root/node shape, root-only `commandLevels`, the seven `options` keys, and a 30-digit `sidc`. Business rules (12 CJK / 20 letters, SIDC semantics, duplicate names) remain in `validate`.
 
 ## Cancellation
 

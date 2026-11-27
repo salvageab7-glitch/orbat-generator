@@ -30,6 +30,18 @@ The DSH subprocess adapter starts the fixed validation CLI and Node renderer dir
 
 The tool output is bounded: at most 50 validation issues are returned, with `issueCount` and `issuesTruncated` indicating whether more exist. Validation uses the CLI's single-JSON stdout protocol; the render tool verifies the expected PNG/SVG files after the bundled renderer exits.
 
+## Android trigger and status (mode 3)
+
+**Default path:** open `orbat_core` with mode 3 selected and storage access granted. The app scans `Download/orbat_inbox` automatically; no ADB or Shizuku is required.
+
+**Optional path:** `am start -a com.orbat.orbat_core.plugin.RUN -n com.orbat.orbat_core/.MainActivity` only works when the host can execute shell/ADB (or Shizuku). Many agent hosts disable `android_shell`; do not make this the default.
+
+**First run:** Android shows a “DSH Go wants to open orbat_core” handoff dialog and an “All files access” request. The user must allow both once (“Always allow” recommended).
+
+**Status:** `_status.json` now carries `runId`, `state` (`idle/queued/running/done/failed`), `triggerAt`, `current`, and per-file `files[]`. Poll for a new `runId`, then wait for `done/failed`; do not treat an old `lastRun` as this run. On failure/render-not-delivered it also writes `outbox/<runId>.log.txt` and exposes `log`/`logTail`.
+
+**Artifacts:** outputs use `<name>__<runId>.png|svg|normalized.json|report.json` in `orbat_outbox/`. Use the `png`/`svg`/`report` paths returned in `_status.json` or the report; do not assume `<name>.png` still exists.
+
 ## Install a local checkout
 
 This bundle is intended to be installed through DSH Plugin Manager, not by copying files into the DSH profile manually:
@@ -47,7 +59,7 @@ The CLI JSON protocol is documented in [`CLI-PROTOCOL.md`](CLI-PROTOCOL.md). Oth
 
 ## Current release status
 
-This is the `0.3.6` public release bundle, built for the DSH `0.2.2-rc.5` plugin contract and published with the ORBAT Generator `0.3.6` desktop release. It includes the Settings page for PNG background/output directory, the shared workflow self-check, path-based validation/rendering, the 0.3.6 SIDC/echelon fixes, and the default workspace `编制插件产物仓库` output policy. It uses an existing Node.js 24+ installation when available; otherwise it downloads pinned Node.js `v24.22.3`, verifies the archive and executable SHA-256 values, and keeps the binary and upstream `LICENSE` in the current user's LocalAppData. The Host settings route, settings persistence, self-check workflow, Client registration/localization, workspace output, path input, HQ echelon fallback, and PNG/SVG rendering have been verified.
+This is the `0.3.7-beta` public release bundle, built for the DSH `0.2.2-rc.5` plugin contract and published with the ORBAT Generator `0.3.7-beta` desktop release. It includes the Settings page for PNG background/output directory, the shared workflow self-check, path-based validation/rendering, the 0.3.6 SIDC/echelon fixes, and the default workspace `编制插件产物仓库` output policy. It uses an existing Node.js 24+ installation when available; otherwise it downloads pinned Node.js `v24.22.3`, verifies the archive and executable SHA-256 values, and keeps the binary and upstream `LICENSE` in the current user's LocalAppData. The Host settings route, settings persistence, self-check workflow, Client registration/localization, workspace output, path input, HQ echelon fallback, and PNG/SVG rendering have been verified.
 
 ---
 
@@ -62,6 +74,18 @@ This is the `0.3.6` public release bundle, built for the DSH `0.2.2-rc.5` plugin
 在 **设置 → 编制图** 中可以切换 PNG 白底/透明背景、设置或恢复默认输出目录，并运行自检。SVG 导出始终透明。
 
 插件本身不调用 AI API，也不需要 DeepSeek API Key。Agent 使用自己的模型和读图能力生成 JSON，再调用插件工具。渲染成功后，请使用 DSH 的 `present` 工具展示返回的 `pngPath`。新用户Agent请先阅读 [`AGENT-GUIDE.md`](AGENT-GUIDE.md)，了解JSON结构、SIDC边界和忠实来源的读图流程。
+
+## 安卓触发与状态（模式三）
+
+**默认路径：** 打开 `orbat_core`，模式三、存储权限已授予；App 会自动扫描 `Download/orbat_inbox`，不需要 ADB/Shizuku。
+
+**可选路径：** `am start -a com.orbat.orbat_core.plugin.RUN -n com.orbat.orbat_core/.MainActivity` 仅在宿主能执行 shell/ADB（或 Shizuku）时可用；很多 Agent 宿主默认关闭 `android_shell`，不要把它当默认。
+
+**首次使用：** Android 会弹“DSH Go 想要打开 orbat_core” handoff 和“所有文件访问”；用户各允许一次即可（建议“始终允许”）。
+
+**状态：** `_status.json` 现在含 `runId/state(idle/queued/running/done/failed)/triggerAt/current/files[]`。轮询时先等新的 `runId`，再等 `done/failed`；不要把旧 `lastRun` 当本次结果。失败/渲染未交付时会写 `outbox/<runId>.log.txt`，并提供 `log/logTail`。
+
+**产物：** `orbat_outbox/` 使用 `<name>__<runId>.png|svg|normalized.json|report.json`；以 `_status.json`/report 返回的路径为准，不要假设 `<name>.png` 还存在。
 
 ## 依赖
 
@@ -98,4 +122,4 @@ DSH 子进程适配器通过固定 argv 分别启动校验 CLI 和 Node renderer
 
 ## 当前状态
 
-这是 `0.3.6` 公开版插件包，基于当前 DSH `0.2.2-rc.5` 插件契约，并与 ORBAT Generator `0.3.6` 桌面版一同发布。本版本包含设置页面（PNG 背景和默认输出目录）、与 Agent 自检工具共用的工作流检查、`path` 文件输入、0.3.6 的 SIDC/梯队修正，以及默认写入会话工作区 `编制插件产物仓库` 的策略。若系统没有 Node.js 24+，插件会从 Node.js 官方站点下载固定的 `v24.22.3`，校验归档和可执行文件 SHA-256，并将二进制及上游 `LICENSE` 保存在当前用户的 LocalAppData。Host 设置路由、设置持久化、自检工作流、Client 注册/语言、工作区落盘、path 输入、HQ 梯队兜底和 PNG/SVG 渲染均已验证。
+这是 `0.3.7-beta` 公开版插件包，基于当前 DSH `0.2.2-rc.5` 插件契约，并与 ORBAT Generator `0.3.6` 桌面版一同发布。本版本包含设置页面（PNG 背景和默认输出目录）、与 Agent 自检工具共用的工作流检查、`path` 文件输入、0.3.6 的 SIDC/梯队修正，以及默认写入会话工作区 `编制插件产物仓库` 的策略。若系统没有 Node.js 24+，插件会从 Node.js 官方站点下载固定的 `v24.22.3`，校验归档和可执行文件 SHA-256，并将二进制及上游 `LICENSE` 保存在当前用户的 LocalAppData。Host 设置路由、设置持久化、自检工作流、Client 注册/语言、工作区落盘、path 输入、HQ 梯队兜底和 PNG/SVG 渲染均已验证。

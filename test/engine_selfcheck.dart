@@ -2,6 +2,10 @@
 import 'dart:io';
 import 'package:orbat_core/core/sidc.dart';
 import 'package:orbat_core/core/orbat.dart';
+import 'package:orbat_core/core/sidc_rule.dart';
+import 'package:orbat_core/ai/deepseek_client.dart';
+import 'package:orbat_core/ai/api_endpoint.dart';
+import 'package:orbat_core/ai/model_catalog.dart';
 
 void main() {
   var pass = 0;
@@ -90,13 +94,15 @@ void main() {
     additionalInformation: 'HQ',
     sidc: Sidc(echelon: '18', entity: '110000', typeMod: '98').build(),
   );
-  check('HQ加98被拦',
-      OrbatValidator.validate(hqBad).issues.any((i) => i.message.contains('禁止加类型修饰 98')));
+  check(
+      'HQ加98被拦',
+      OrbatValidator.validate(hqBad)
+          .issues
+          .any((i) => i.message.contains('禁止加类型修饰 98')));
 
   print('=== 7. 符号集分支（陆地10 / 空中01）===');
   // 空中运输机：符号集 01，前缀 13030100
-  final airTransport = Sidc(
-      symbolSet: '01', echelon: '11', entity: '110107');
+  final airTransport = Sidc(symbolSet: '01', echelon: '11', entity: '110107');
   check('空中码前缀=13030100', airTransport.build().startsWith('13030100'));
   check('空中码长度30', airTransport.build().length == 30);
   final airParsed = Sidc.parse(airTransport.build())!;
@@ -125,8 +131,147 @@ void main() {
     additionalInformation: 'JTF',
     sidc: '130310001500000000000000000000',
   );
-  check('000000通用码不放warn',
-      !OrbatValidator.validate(generic).issues.any((i) => i.message.contains('不在符号集')));
+  check(
+      '000000通用码不放warn',
+      !OrbatValidator.validate(generic)
+          .issues
+          .any((i) => i.message.contains('不在符号集')));
+
+  print('=== 8. 高频码表缺口 ===');
+  void checkArm(String name, String entity) {
+    final g = SidcRule.fromName(name);
+    check('$name -> $entity', g.entity == entity);
+  }
+
+  checkArm('装甲列车', '120500');
+  checkArm('战役战术导弹旅', '130700');
+  checkArm('空中骑兵连', '120600');
+  checkArm('航空支援连', '120600');
+  checkArm('副官署', '165600');
+  checkArm('军需连', '162900');
+  checkArm('Armored Train', '120500');
+  checkArm('Theater Missile Brigade', '130700');
+  checkArm('Air Cavalry Troop', '120600');
+  checkArm('Aviation Support Company', '120600');
+  checkArm('Adjutant Section', '165600');
+  checkArm('Quartermaster Company', '162900');
+  check('反坦克导弹连不被通用导弹抢', SidcRule.fromName('反坦克导弹连').entity == '120400');
+  check('防空导弹营仍是防空', SidcRule.fromName('防空导弹营').entity == '130101');
+
+  print('=== 9. OpenAI 兼容 API 地址 ===');
+  check(
+    'DeepSeek 默认地址',
+    DeepSeekConfig(apiKey: 'x').chatCompletionsUrl ==
+        'https://api.deepseek.com/chat/completions',
+  );
+  check(
+    'OpenAI /v1 + 尾斜杠',
+    DeepSeekConfig(
+          apiKey: 'x',
+          baseUrl: 'https://api.openai.com/v1/',
+        ).chatCompletionsUrl ==
+        'https://api.openai.com/v1/chat/completions',
+  );
+  check(
+    '完整 chat/completions 不重复拼接',
+    DeepSeekConfig(
+          apiKey: 'x',
+          baseUrl: 'https://example.com/v1/chat/completions',
+        ).chatCompletionsUrl ==
+        'https://example.com/v1/chat/completions',
+  );
+  check('DeepSeek 识别', DeepSeekConfig(apiKey: 'x').isDeepSeek);
+  check(
+    'OpenAI 不发送 DeepSeek thinking',
+    !DeepSeekConfig(
+      apiKey: 'x',
+      baseUrl: 'https://api.openai.com/v1',
+    ).isDeepSeek,
+  );
+
+  print('=== 10. 模型列表与 OpenCode 适配 ===');
+  check(
+    'OpenAI /v1 归一化',
+    normalizeApiBaseUrl('https://api.openai.com/v1/') ==
+        'https://api.openai.com/v1',
+  );
+  check(
+    '完整 chat 地址退回 base',
+    normalizeApiBaseUrl('https://example.com/v1/chat/completions') ==
+        'https://example.com/v1',
+  );
+  check(
+    'models URL',
+    modelsUrl('https://api.openai.com/v1') ==
+        'https://api.openai.com/v1/models',
+  );
+  check('OpenCode Go 识别', isOpenCodeGoBase('https://opencode.ai/zen/go/v1'));
+  check(
+    'OpenCode inference 识别',
+    isOpenCodeGoBase('https://opencode.ai/inference/go/openai/v1'),
+  );
+  final genericModels = parseGenericModels({
+    'data': [
+      {'id': 'gpt-a'},
+      {'id': 'gpt-b'},
+      {'id': 'gpt-a'},
+    ],
+  });
+  check(
+    '通用模型解析去重',
+    genericModels.length == 2 && genericModels.first.id == 'gpt-a',
+  );
+  final meta = parseOpenCodeModels({
+    'opencode-go': {
+      'models': {
+        'vision-chat': {
+          'type': 'chat',
+          'id': 'vision-chat',
+          'name': 'Vision Chat',
+          'modalities': {
+            'input': ['text', 'image/png'],
+          },
+        },
+        'text-chat': {
+          'type': 'chat',
+          'id': 'text-chat',
+          'modalities': {
+            'input': ['text'],
+          },
+        },
+        'embed': {
+          'type': 'embedding',
+          'id': 'embed',
+        },
+      },
+    },
+  }, go: true);
+  check('OpenCode 过滤非 chat', meta.length == 2);
+  check(
+    'OpenCode vision 标记',
+    meta.firstWhere((m) => m.id == 'vision-chat').vision,
+  );
+  check(
+    'OpenCode 文本模型非 vision',
+    !meta.firstWhere((m) => m.id == 'text-chat').vision,
+  );
+  final ocConfig = DeepSeekConfig(
+    apiKey: 'x',
+    baseUrl: 'https://opencode.ai/zen/go/v1',
+  );
+  check('OpenCode 关闭思考', ocConfig.shouldDisableThinking);
+  check('OpenCode 需要 session', ocConfig.isOpenCode);
+  check(
+    '普通 OpenAI 不关思考',
+    !DeepSeekConfig(
+      apiKey: 'x',
+      baseUrl: 'https://api.openai.com/v1',
+    ).shouldDisableThinking,
+  );
+  check(
+    'session 可显式覆盖',
+    DeepSeekConfig(apiKey: 'x', sessionId: 's1').effectiveSessionId == 's1',
+  );
 
   print('\n=== 结果: PASS $pass / FAIL $fail ===');
   if (fail > 0) exitCode = 1;

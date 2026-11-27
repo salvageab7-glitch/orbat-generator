@@ -14,6 +14,34 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:image/image.dart' as img;
+
+/// PNG 质量检查结果：签名/尺寸/非空白比例。
+class RenderQuality {
+  final bool ok;
+  final String detail;
+  final int width;
+  final int height;
+  final double nonBlankRatio;
+
+  const RenderQuality({
+    required this.ok,
+    required this.detail,
+    this.width = 0,
+    this.height = 0,
+    this.nonBlankRatio = 0,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'ok': ok,
+        'detail': detail,
+        'width': width,
+        'height': height,
+        'nonBlankRatio': double.parse(nonBlankRatio.toStringAsFixed(4)),
+      };
+}
 
 /// 出图结果
 class RenderResult {
@@ -23,6 +51,9 @@ class RenderResult {
   final String? error;
   final Duration elapsed;
   final String? logPath;
+
+  /// PNG 质量检查（签名/尺寸/非空白）。
+  final RenderQuality? quality;
 
   /// 给界面看的过程提示（如“渲染前修正了 1 处梯队码”）。
   /// 只用于日志展示，不影响出图结果；默认空。
@@ -35,6 +66,7 @@ class RenderResult {
     this.error,
     required this.elapsed,
     this.logPath,
+    this.quality,
     this.notices = const [],
   });
 
@@ -46,6 +78,7 @@ class RenderResult {
         error: error,
         elapsed: elapsed,
         logPath: logPath,
+        quality: quality,
         notices: [...notices, notice],
       );
 
@@ -136,6 +169,167 @@ Future<Directory?> resolveWritableDir() async {
   return null;
 }
 
+const List<int> _pngSignature = <int>[137, 80, 78, 71, 13, 10, 26, 10];
+
+/// 校验 PNG 签名与 IHDR 宽高，避免把半截/损坏文件当成功。
+bool isValidPngBytes(List<int> bytes) {
+  if (bytes.length < 24) return false;
+  for (int i = 0; i < _pngSignature.length; i++) {
+    if (bytes[i] != _pngSignature[i]) return false;
+  }
+  // IHDR 必须是第一个 chunk：长度(4)+类型(4)+宽(4)+高(4)
+  if (bytes[12] != 0x49 ||
+      bytes[13] != 0x48 ||
+      bytes[14] != 0x44 ||
+      bytes[15] != 0x52) {
+    return false;
+  }
+  final int width = _readUint32(bytes, 16);
+  final int height = _readUint32(bytes, 20);
+  return width > 0 && height > 0 && width <= 20000 && height <= 20000;
+}
+
+int _readUint32(List<int> bytes, int offset) =>
+    (bytes[offset] << 24) |
+    (bytes[offset + 1] << 16) |
+    (bytes[offset + 2] << 8) |
+    bytes[offset + 3];
+
+/// 解码 PNG 做最小质量检查。
+///
+/// 站点可能停在 `AFFILIATION: Pending`/`Load License` 就“成功”返回一个
+/// 几乎空白的 PNG。签名/尺寸检查抓不到这种情况，所以再抽样统计非背景像素。
+RenderQuality inspectPngQuality(
+  List<int> bytes, {
+  bool whiteBackground = true,
+  int minWidth = 200,
+  int minHeight = 150,
+  double minNonBlankRatio = 0.002,
+}) {
+  if (!isValidPngBytes(bytes)) {
+    return const RenderQuality(ok: false, detail: 'PNG 签名/尺寸非法');
+  }
+  final img.Image? decoded;
+  try {
+    decoded = img.decodePng(Uint8List.fromList(bytes));
+  } catch (e) {
+    return RenderQuality(ok: false, detail: 'PNG 解码失败: $e');
+  }
+  if (decoded == null) {
+    return const RenderQuality(ok: false, detail: 'PNG 解码为空');
+  }
+  if (decoded.width < minWidth || decoded.height < minHeight) {
+    return RenderQuality(
+      ok: false,
+      detail: 'PNG 尺寸过小 ${decoded.width}×${decoded.height}',
+      width: decoded.width,
+      height: decoded.height,
+    );
+  }
+
+  final int stepX = decoded.width ~/ 120 < 1 ? 1 : decoded.width ~/ 120;
+  final int stepY = decoded.height ~/ 120 < 1 ? 1 : decoded.height ~/ 120;
+  var total = 0;
+  var nonBlank = 0;
+  for (var y = 0; y < decoded.height; y += stepY) {
+    for (var x = 0; x < decoded.width; x += stepX) {
+      final img.Pixel pixel = decoded.getPixel(x, y);
+      final int r = pixel.r.toInt();
+      final int g = pixel.g.toInt();
+      final int b = pixel.b.toInt();
+      final int a = pixel.a.toInt();
+      final bool blank =
+          whiteBackground ? (r > 245 && g > 245 && b > 245 && a > 0) : a < 8;
+      if (!blank) nonBlank++;
+      total++;
+    }
+  }
+  final double ratio = total == 0 ? 0 : nonBlank / total;
+  if (ratio < minNonBlankRatio) {
+    return RenderQuality(
+      ok: false,
+      detail: 'PNG 近似空白（非背景像素 ${(ratio * 100).toStringAsFixed(2)}%）',
+      width: decoded.width,
+      height: decoded.height,
+      nonBlankRatio: ratio,
+    );
+  }
+  return RenderQuality(
+    ok: true,
+    detail: 'PNG ${decoded.width}×${decoded.height}，'
+        '非背景 ${(ratio * 100).toStringAsFixed(2)}%',
+    width: decoded.width,
+    height: decoded.height,
+    nonBlankRatio: ratio,
+  );
+}
+
+/// 把超宽 PNG 等比缩到 `maxWidth`，仍保持“整图”而不是分页。
+///
+/// 只在 `commandLevels:"2"` 仍不够窄时作为最后手段；返回缩放后的质量，
+/// 调用方需把 `strategy` 标为 `downscale` 并提示字号可能变小。
+Future<RenderQuality> downscalePngToWidth(
+  String path, {
+  required int maxWidth,
+  bool whiteBackground = true,
+}) async {
+  final List<int> bytes = await File(path).readAsBytes();
+  final img.Image? decoded = img.decodePng(Uint8List.fromList(bytes));
+  if (decoded == null || decoded.width <= maxWidth) {
+    return inspectPngQuality(bytes, whiteBackground: whiteBackground);
+  }
+  final img.Image resized = img.copyResize(
+    decoded,
+    width: maxWidth,
+    interpolation: img.Interpolation.cubic,
+  );
+  final List<int> out = img.encodePng(resized);
+  await writeBytesAtomic(path, out);
+  return inspectPngQuality(out, whiteBackground: whiteBackground);
+}
+
+/// 先写同目录临时文件，再替换目标；失败时清理临时文件。
+Future<void> writeBytesAtomic(String path, List<int> bytes) async {
+  final File tmp = File('$path.tmp-${DateTime.now().microsecondsSinceEpoch}');
+  try {
+    await tmp.parent.create(recursive: true);
+    await tmp.writeAsBytes(bytes, flush: true);
+    await replaceFile(tmp, path);
+  } catch (_) {
+    try {
+      if (await tmp.exists()) await tmp.delete();
+    } catch (_) {}
+    rethrow;
+  }
+}
+
+Future<void> writeStringAtomic(String path, String text) async {
+  final File tmp = File('$path.tmp-${DateTime.now().microsecondsSinceEpoch}');
+  try {
+    await tmp.parent.create(recursive: true);
+    await tmp.writeAsString(text, encoding: utf8, flush: true);
+    await replaceFile(tmp, path);
+  } catch (_) {
+    try {
+      if (await tmp.exists()) await tmp.delete();
+    } catch (_) {}
+    rethrow;
+  }
+}
+
+/// 尽量原子替换：先 rename；Windows 目标已存在时删除旧文件再 rename。
+Future<void> replaceFile(File source, String targetPath) async {
+  try {
+    await source.rename(targetPath);
+    return;
+  } catch (_) {
+    // Windows 不允许 rename 覆盖已存在文件，走删除后重试。
+  }
+  final File target = File(targetPath);
+  if (await target.exists()) await target.delete();
+  await source.rename(targetPath);
+}
+
 /// 渲染器
 class OrbatRenderer {
   final RendererConfig config;
@@ -209,6 +403,7 @@ class OrbatRenderer {
       String? png,
       String? svg,
       String? error,
+      RenderQuality? quality,
     }) {
       return RenderResult(
         ok: ok,
@@ -217,6 +412,7 @@ class OrbatRenderer {
         error: error,
         elapsed: sw.elapsed,
         logPath: logFile?.path,
+        quality: quality,
       );
     }
 
@@ -287,6 +483,10 @@ class OrbatRenderer {
 
     // ---- 4) 写输入 + 起子进程 ----
     Directory? tmpDir;
+    String? tempPngPath;
+    String? tempSvgPath;
+    final String tempBase =
+        '$outputBase.orbat-tmp-${DateTime.now().microsecondsSinceEpoch}';
     try {
       try {
         tmpDir = await workBase.createTemp('orbat_input_');
@@ -301,7 +501,7 @@ class OrbatRenderer {
 
       final process = await Process.start(
         node,
-        [config.scriptPath, inputFile.path, outputBase],
+        [config.scriptPath, inputFile.path, tempBase],
         environment: {
           'SCALE': '${config.scale}',
           // 白色背景开关：0 = 透明底 PNG
@@ -397,21 +597,62 @@ class OrbatRenderer {
         return finish(ok: false, error: '脚本未返回 PNG 路径，输出如下：\n${_tail(stdout)}');
       }
 
+      tempPngPath = png;
+      tempSvgPath = svg;
       final pngFile = File(png);
       if (!pngFile.existsSync() || pngFile.lengthSync() == 0) {
         return finish(ok: false, error: 'PNG 未生成或为空: $png');
       }
-      log(
-        '[client] PNG 已生成 ${(pngFile.lengthSync() / 1024).toStringAsFixed(0)} KB',
+      final List<int> pngBytes = pngFile.readAsBytesSync();
+      final int pngKb = (pngBytes.length / 1024).round();
+      final RenderQuality quality = inspectPngQuality(
+        pngBytes,
+        whiteBackground: config.whiteBackground,
       );
+      if (!quality.ok) {
+        return finish(
+          ok: false,
+          error: 'PNG 质量检查失败：${quality.detail}',
+          quality: quality,
+        );
+      }
 
-      return finish(ok: true, png: png, svg: svg);
+      final String finalPng = '$outputBase.png';
+      await replaceFile(pngFile, finalPng);
+      String? finalSvg;
+      if (svg != null && svg.isNotEmpty) {
+        try {
+          final File svgFile = File(svg);
+          if (svgFile.existsSync() && svgFile.lengthSync() > 0) {
+            final String finalSvgPath = '$outputBase.svg';
+            await replaceFile(svgFile, finalSvgPath);
+            finalSvg = finalSvgPath;
+          }
+        } catch (e) {
+          log('[client] SVG 写入失败（不影响 PNG）: $e');
+        }
+      }
+      log('[client] PNG 已校验并写入 $finalPng $pngKb KB｜${quality.detail}');
+
+      return finish(
+        ok: true,
+        png: finalPng,
+        svg: finalSvg,
+        quality: quality,
+      );
     } catch (e, st) {
       log('[client] 异常: $e');
       writeLog(st.toString());
       return finish(ok: false, error: '出图异常：$e');
     } finally {
-      // 清理临时输入（失败无所谓）
+      // 清理临时输入/未成功替换的临时产物（失败无所谓）
+      for (final String? p in <String?>[tempPngPath, tempSvgPath]) {
+        if (p == null || p.isEmpty) continue;
+        try {
+          final File f = File(p);
+          if (await f.exists()) await f.delete();
+        } catch (_) {}
+      }
       try {
         await tmpDir?.delete(recursive: true);
       } catch (_) {}

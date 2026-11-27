@@ -67,6 +67,10 @@ class PipelineResult {
 class OrbatPipeline {
   final String apiKey;
   final String model;
+
+  /// OpenAI 兼容 API 基址（默认 DeepSeek）。
+  final String apiBaseUrl;
+
   final String? renderScriptPath;
   final int maxRepairRounds;
 
@@ -76,13 +80,18 @@ class OrbatPipeline {
   /// 输出语言：true = JSON 全中文（名称译成中文）；false = 保留原文称号/番号/注释
   final bool forceChinese;
 
+  /// 用户设置的渲染指挥层级（'2'/'3'）；null/非法时按 JSON 根节点决定。
+  final String? preferredCommandLevels;
+
   OrbatPipeline({
     required this.apiKey,
     this.model = 'deepseek-flash',
+    this.apiBaseUrl = 'https://api.deepseek.com',
     this.renderScriptPath,
     this.maxRepairRounds = 2,
     this.whiteBackground = true,
     this.forceChinese = true,
+    this.preferredCommandLevels,
   });
 
   /// 从图片生成编制。
@@ -152,7 +161,11 @@ class OrbatPipeline {
       );
     }
     final client = DeepSeekClient(
-      config: DeepSeekConfig(apiKey: apiKey, model: model),
+      config: DeepSeekConfig(
+        apiKey: apiKey,
+        model: model,
+        baseUrl: apiBaseUrl,
+      ),
       systemPrompt: kTileSystemPrompt,
     );
 
@@ -175,10 +188,12 @@ class OrbatPipeline {
           forceChinese: forceChinese,
         );
 
+        final Duration tileTimeout = dynamicTimeoutFor(t.srcW * t.srcH);
         final text = await client.generateTextFromImage(
           imageBytes: t.png,
           mimeType: 'image/png',
           prompt: prompt,
+          timeout: tileTimeout,
         );
         attempts++;
 
@@ -209,6 +224,7 @@ class OrbatPipeline {
             prompt: '$prompt\n\n'
                 '注意：上一次几乎没读出内容。请再逐行仔细扫描这张图，'
                 '把能辨认的单位都输出（宁少勿编），名称务必完整。',
+            timeout: tileTimeout,
           );
           attempts++;
           final jsonBlock2 = text2 != null ? extractJsonBlock(text2) : null;
@@ -331,7 +347,11 @@ class OrbatPipeline {
       final redIssues = report.issues.where((i) => i.level == 'red').toList();
       final repairPrompt = _buildPatchPrompt(merged, redIssues);
       final c2 = DeepSeekClient(
-        config: DeepSeekConfig(apiKey: apiKey, model: model),
+        config: DeepSeekConfig(
+          apiKey: apiKey,
+          model: model,
+          baseUrl: apiBaseUrl,
+        ),
         systemPrompt: kOrbatSystemPrompt,
       );
       try {
@@ -407,7 +427,11 @@ class OrbatPipeline {
     required Future<GenerateResult> Function(DeepSeekClient) callAi,
   }) async {
     final client = DeepSeekClient(
-      config: DeepSeekConfig(apiKey: apiKey, model: model),
+      config: DeepSeekConfig(
+        apiKey: apiKey,
+        model: model,
+        baseUrl: apiBaseUrl,
+      ),
       systemPrompt: kOrbatSystemPrompt,
     );
 
@@ -560,12 +584,22 @@ class OrbatPipeline {
     String outputBase,
   )? androidRenderHook;
 
+  /// 渲染层级优先级：显式 override > 用户设置 > JSON 根节点。
+  String _renderLevels(OrbatNode tree, String? override) {
+    final o = override?.trim();
+    if (o == '2' || o == '3') return o!;
+    final p = preferredCommandLevels?.trim();
+    if (p == '2' || p == '3') return p!;
+    return _resolveCommandLevels(tree);
+  }
+
   /// 出图。[onLog] 用于把渲染脚本的每一行输出实时推给界面。
   Future<RenderResult> render(
     OrbatNode tree, {
     required String outputBase,
     StageCallback? onStage,
     void Function(String line)? onLog,
+    String? commandLevelsOverride,
   }) async {
     // 只对“送渲染”的副本做梯队兜底；源 tree 保持原样，保存/导出的 JSON 不被悄悄改写。
     final echelonFix = OrbatAutoFix.fixEchelonReport(tree);
@@ -598,7 +632,7 @@ class OrbatPipeline {
       final result = await hook(
         normalizeTreeJson(
           renderTree,
-          commandLevels: _resolveCommandLevels(renderTree),
+          commandLevels: _renderLevels(renderTree, commandLevelsOverride),
           adaptForRender: true,
         ),
         outputBase,
@@ -623,7 +657,7 @@ class OrbatPipeline {
       // 只有送渲染器这一步才做名称长度适配；导出/保存的 JSON 保持原文
       normalizedJson: normalizeTreeJson(
         renderTree,
-        commandLevels: _resolveCommandLevels(renderTree),
+        commandLevels: _renderLevels(renderTree, commandLevelsOverride),
         adaptForRender: true,
       ),
       outputBase: outputBase,

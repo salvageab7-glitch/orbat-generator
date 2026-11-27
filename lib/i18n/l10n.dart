@@ -128,6 +128,38 @@ const Map<String, String> _en = {
       'Please switch to the existing window. This one will close.',
   '切换主题': 'Toggle theme',
   '设置': 'Settings',
+  '指挥层级 commandLevels': 'Command levels (commandLevels)',
+  '默认 3（推荐，排布更紧凑）；2 仅用于特殊宽树，可能反而更宽。会覆盖 JSON 根节点的设置。':
+      '3 is recommended (more compact); use 2 only for special wide trees. It overrides the JSON root setting.',
+  '3 · 默认（推荐）': '3 · Default (recommended)',
+  '2 · 特殊宽树': '2 · Special wide tree',
+  'API Key（OpenAI / DeepSeek）': 'API Key (OpenAI / DeepSeek)',
+  'API 地址（OpenAI 兼容）': 'API base URL (OpenAI-compatible)',
+  '填到 /v1 为止；也接受完整 /chat/completions。DeepSeek 留默认即可。':
+      'Enter up to /v1; a full /chat/completions URL also works. Keep the default for DeepSeek.',
+  '需与 API 地址匹配；可手填自定义模型 id':
+      'Must match the API base URL; a custom model id can be typed.',
+  '软件版本': 'Version',
+  'AI 接口连通': 'AI API reachable',
+  '服务类型': 'Service type',
+  'DeepSeek 使用官方预设；OpenAI 兼容可填任意 /v1 地址（含 OpenCode Go）。':
+      'DeepSeek uses presets; OpenAI-compatible accepts any /v1 endpoint (including OpenCode Go).',
+  'OpenAI 兼容 / OpenCode Go': 'OpenAI-compatible / OpenCode Go',
+  'API 地址（DeepSeek）': 'API base URL (DeepSeek)',
+  '读取模型列表': 'Fetch model list',
+  '读取中…': 'Fetching…',
+  '可用模型': 'Available models',
+  '来自 API 的 /models；标注 vision 的模型支持图片输入':
+      'From the API /models; models marked vision support image input.',
+  '请先填写 API 地址和 API Key': 'Enter the API base URL and API key first',
+  '请先读取模型列表或手填模型 id': 'Fetch the model list or type a model id first',
+  '模型 id（可手填，列表失败时用）': 'Model id (manual fallback if listing fails)',
+  '例如 deepseek-v4.1-flash': 'e.g. deepseek-v4.1-flash',
+  '模式一需要 API Key，模式三不需要。': 'Mode 1 needs an API key; Mode 3 does not.',
+  '模式三不调用本软件 API；可预先配置，切到模式一/二后生效':
+      'Mode 3 does not use the app API; you can pre-configure it for Modes 1/2.',
+  '模式三不调用本软件模型；可预先配置':
+      'Mode 3 does not use the app model; you can pre-configure it.',
   '检查运行环境': 'Check environment',
   '自检': 'Self-check',
   '自检中…': 'Self-check running…',
@@ -247,8 +279,7 @@ const Map<String, String> _en = {
   '之后可随时在右上角设置里修改。': 'You can change it later in Settings.',
   '稍后再说': 'Later',
   '打开设置': 'Open settings',
-  '请先在右上角设置里填写 DeepSeek API Key':
-      'Enter your DeepSeek API key in Settings first',
+  '请先在右上角设置里填写 API Key': 'Enter your API key in Settings first',
   '请截图后导入图片，或把文字粘贴到「纯文本」模式':
       'Take a screenshot and import it, or paste text in Plain-text mode',
   '纯文本模式：请先粘贴或输入编制资料': 'Plain-text mode: paste or type source text first',
@@ -360,8 +391,8 @@ const Map<String, String> _en = {
   '成功 {n}': 'Succeeded {n}',
   '把一个 PDF 交给视觉模型，需要逐页转成图片，token 消耗通常是单张图片的 3-10 倍，页数多的文件尤其明显。\n\n更省的做法：\n· 只截取需要的那一页导出为 PNG 再导入\n· 或把文字复制到「纯文本」模式\n\n当前版本尚未开放 PDF/DOC 的直接解析，继续会提示你改用截图或文本。':
       'Sending a PDF to a vision model means converting every page to an image — typically 3-10x the tokens of a single picture, worse for long documents.\n\nCheaper options:\n· Screenshot just the page you need, export as PNG and import that\n· Or paste the text into Plain-text mode\n\nDirect PDF/DOC parsing is not available in this version; continuing will ask you to use screenshots or text.',
-  '识图功能需要 DeepSeek API Key：\n\n1. 在 platform.deepseek.com 注册并创建 API Key；\n2. 点下方「打开设置」粘贴 Key；\n3. 出图功能不需要 Key，但需要安装 Node.js 24 或更高版本。\n\n之后可随时在右上角设置里修改。':
-      'Image recognition needs a DeepSeek API key:\n\n1. Sign up at platform.deepseek.com and create an API key;\n2. Click "Open settings" below and paste it;\n3. Rendering does not need a key, but requires Node.js 24 or newer.\n\nYou can change this anytime in Settings.',
+  '识图功能需要 OpenAI 兼容 API 的 Key：\n\n1. 在 API 提供方（DeepSeek / OpenAI 等）创建 Key；\n2. 点下方「打开设置」粘贴 Key，并按需填写 API 地址与模型 id；\n3. 出图功能不需要 Key，但需要安装 Node.js 24 或更高版本。\n\n之后可随时在右上角设置里修改。':
+      'Image recognition needs an OpenAI-compatible API key:\n\n1. Create a key with your provider (DeepSeek / OpenAI, etc.);\n2. Click "Open settings" below, paste the key, and set the API base URL/model id as needed;\n3. Rendering does not need a key, but requires Node.js 24 or newer.\n\nYou can change this anytime in Settings.',
   '模型原生思考链（reasoning_content）：仅 deepseek-reasoner 等模型会产生；deepseek-flash 默认关闭，此栏通常为空。':
       'Model reasoning (reasoning_content): only produced by models such as deepseek-reasoner; disabled by default in deepseek-flash, so this is usually empty.',
   '校验问题（{n}）': 'Validation issues ({n})',
@@ -374,6 +405,12 @@ const Map<String, String> _en = {
   '正在出图…\n进度见上方，完整日志在下方': 'Rendering…\nProgress above, full log below.',
   '点顶部「出图」调用线上渲染器\n需要联网，约 15-60 秒':
       'Click Render to use the online renderer.\nNeeds internet, about 15-60 seconds.',
+  '正在出图': 'Rendering',
+  '正在调用线上渲染器': 'Calling the online renderer',
+  '页面已在后台运行，请保持网络连接（约 15-60 秒）':
+      'Running in the background. Keep the network connected (about 15-60 seconds).',
+  '产物已保存，正在返回主界面…': 'Output saved. Returning to the main screen…',
+  '出图失败，请查看运行日志': 'Render failed. Check the run log.',
   '批量识图 + 自动出图\n\n点「添加图片」一次选多张，程序会串行处理：\n· 每张自动生成 JSON + PNG + SVG，存到图片同目录\n· 失败的可单独重试，不影响其他任务\n· 点击已完成的结果可载入到左侧，再点「对比」看差异':
       'Batch recognition + render\n\nPick several images at once; they are processed one by one:/n· Each produces JSON + PNG + SVG next to the source image\n· Failed items can be retried individually\n· Load any result afterwards to compare',
   '可补充：编制年代、番号体系、需要保留的原文缩写等。\n大图也可以给结构提示：\n总根：第1近卫机械化师\n下辖：师部、第453机械化旅、第51机械化旅':
@@ -407,6 +444,11 @@ const Map<String, String> _en = {
   '选择使用模式': 'Choose how you will use it',
   '三种模式可随时在设置里切换；只有模式一、模式二需要 DeepSeek API Key。':
       'You can switch modes anytime in Settings. Only Modes 1 and 2 need a DeepSeek API key.',
+  '桌面端三种模式可随时切换；安卓端模式二（软件+CLI）不支持。模式一需要 DeepSeek API Key，模式三不需要。':
+      'Desktop supports three modes; Mode 2 (App + CLI) is not supported on Android. Mode 1 needs a DeepSeek API key; Mode 3 does not.',
+  '模式二 · 软件 + CLI（安卓暂不支持）': 'Mode 2 · App + CLI (not supported on Android)',
+  '请授予存储权限（Android 11+ 为「所有文件访问」）后，返回再点一次「插件处理」':
+      'Grant storage access (All files access on Android 11+), then tap Plugin Processing again.',
   '在本软件界面里识图、校验、出图。需要 API Key。':
       'Recognise, validate and render inside this app. Needs an API key.',
   '模式二 · 软件 + CLI': 'Mode 2 · App + CLI',
@@ -422,26 +464,18 @@ const Map<String, String> _en = {
       'In Mode 3 an external agent does the recognition and this app holds no key; switch to Mode 1/2 and add a key to recognise here.',
   '选择使用模式（可随时在设置里切换，只有模式一/二需要 Key）':
       'Choose a mode (switchable in Settings; only Modes 1/2 need a key)',
-  '选择界面语言':
-      'Choose interface language',
-  '简体中文界面':
-      'Simplified Chinese interface',
-  '继续':
-      'Continue',
+  '选择界面语言': 'Choose interface language',
+  '简体中文界面': 'Simplified Chinese interface',
+  '继续': 'Continue',
   '检测到系统语言 {loc}，已默认选中对应语言；之后可随时在设置里更改。':
       'System language detected: {loc}. The matching language is pre-selected; you can change it anytime in Settings.',
-  '使用教程':
-      'Tutorial',
-  '内置教程（纯文字，随界面语言切换）':
-      'Built-in tutorial (text only, follows UI language)',
-  '查看内置教程（纯文字）':
-      'Open built-in tutorial (text)',
+  '使用教程': 'Tutorial',
+  '内置教程（纯文字，随界面语言切换）': 'Built-in tutorial (text only, follows UI language)',
+  '查看内置教程（纯文字）': 'Open built-in tutorial (text)',
   '纯文字版，随界面语言切换；完整图文教程见发布页的 doc 文档。':
       'Text-only version, follows the UI language. The illustrated tutorial is in the doc file on the release page.',
-  '复制全文':
-      'Copy all',
-  '教程全文已复制到剪贴板':
-      'Tutorial copied to clipboard',
+  '复制全文': 'Copy all',
+  '教程全文已复制到剪贴板': 'Tutorial copied to clipboard',
 };
 
 /// 模板 key 以 `{name}` 形式写在 _en 里，由 tf() 替换占位符。

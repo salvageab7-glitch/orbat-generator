@@ -44,9 +44,11 @@ class SelfCheck {
   static Future<SelfCheckResult> run({
     String? renderScriptPath,
     String? apiKey,
+    String? apiBaseUrl,
     bool smokeRender = false,
     String? outputDir,
     int? mode,
+    Future<CheckItem> Function()? androidSmoke,
   }) async {
     final items = <CheckItem>[];
     final log = AppLogger.instance;
@@ -54,7 +56,7 @@ class SelfCheck {
     // 安卓端：出图走内置 WebView 线上渲染，Node/浏览器/渲染脚本三项均不适用
     final isAndroid = Platform.isAndroid;
     String? nodePath; // Windows 分支填充，冒烟用
-    String? script;   // Windows 分支填充，冒烟用
+    String? script; // Windows 分支填充，冒烟用
 
     // ---------- 1. Node.js ----------
     if (isAndroid) {
@@ -64,35 +66,35 @@ class SelfCheck {
         detail: tr('安卓端不需要（出图走内置 WebView）'),
       ));
     } else {
-    nodePath = _findNode();
-    if (nodePath != null) {
-      try {
-        final r = await Process.run(nodePath, ['-v']);
-        final ver = r.stdout.toString().trim();
-        final major =
-            int.tryParse(ver.replaceAll('v', '').split('.').first) ?? 0;
-        items.add(CheckItem(
-          name: tr('Node.js'),
-          ok: major >= 24,
-          detail: '$ver  ($nodePath)',
-          fix: major >= 24 ? null : '出图脚本要求 Node.js ≥ 24（低版本会静默挂死），当前 $ver',
-        ));
-      } catch (e) {
+      nodePath = _findNode();
+      if (nodePath != null) {
+        try {
+          final r = await Process.run(nodePath, ['-v']);
+          final ver = r.stdout.toString().trim();
+          final major =
+              int.tryParse(ver.replaceAll('v', '').split('.').first) ?? 0;
+          items.add(CheckItem(
+            name: tr('Node.js'),
+            ok: major >= 24,
+            detail: '$ver  ($nodePath)',
+            fix: major >= 24 ? null : '出图脚本要求 Node.js ≥ 24（低版本会静默挂死），当前 $ver',
+          ));
+        } catch (e) {
+          items.add(CheckItem(
+            name: tr('Node.js'),
+            ok: false,
+            detail: '无法执行: $e',
+            fix: tr('检查 Node.js 安装是否完整'),
+          ));
+        }
+      } else {
         items.add(CheckItem(
           name: tr('Node.js'),
           ok: false,
-          detail: '无法执行: $e',
-          fix: tr('检查 Node.js 安装是否完整'),
+          detail: tr('未找到'),
+          fix: tr('安装 Node.js 24 或更高版本（出图依赖它）'),
         ));
       }
-    } else {
-      items.add(CheckItem(
-        name: tr('Node.js'),
-        ok: false,
-        detail: tr('未找到'),
-        fix: tr('安装 Node.js 24 或更高版本（出图依赖它）'),
-      ));
-    }
     }
 
     // ---------- 2. 浏览器 ----------
@@ -103,13 +105,13 @@ class SelfCheck {
         detail: tr('安卓端使用内置 WebView'),
       ));
     } else {
-    final browsers = _findBrowsers();
-    items.add(CheckItem(
-      name: tr('浏览器（出图用）'),
-      ok: browsers.isNotEmpty,
-      detail: browsers.isEmpty ? '未找到 Chrome / Edge' : browsers.join('、'),
-      fix: browsers.isEmpty ? '出图需要 Chrome 或 Edge，请安装其一' : null,
-    ));
+      final browsers = _findBrowsers();
+      items.add(CheckItem(
+        name: tr('浏览器（出图用）'),
+        ok: browsers.isNotEmpty,
+        detail: browsers.isEmpty ? '未找到 Chrome / Edge' : browsers.join('、'),
+        fix: browsers.isEmpty ? '出图需要 Chrome 或 Edge，请安装其一' : null,
+      ));
     }
 
     // ---------- 3. 渲染脚本 ----------
@@ -120,25 +122,25 @@ class SelfCheck {
         detail: tr('安卓端不需要（出图走内置 WebView）'),
       ));
     } else {
-    script = renderScriptPath?.trim();
-    if (script == null || script.isEmpty) {
-      // 没配置时，看 exe 同级 runtime 里有没有
-      final bundled = _bundledScript();
-      items.add(CheckItem(
-        name: tr('渲染脚本'),
-        ok: bundled != null,
-        detail: bundled != null ? '使用内置: $bundled' : '设置里未指定，且未找到内置脚本',
-        fix: bundled != null ? null : '在设置中指定 render_orbat.js 的路径',
-      ));
-    } else {
-      final f = File(script);
-      items.add(CheckItem(
-        name: tr('渲染脚本'),
-        ok: f.existsSync(),
-        detail: script,
-        fix: f.existsSync() ? null : '该路径下找不到文件，请重新指定',
-      ));
-    }
+      script = renderScriptPath?.trim();
+      if (script == null || script.isEmpty) {
+        // 没配置时，看 exe 同级 runtime 里有没有
+        final bundled = _bundledScript();
+        items.add(CheckItem(
+          name: tr('渲染脚本'),
+          ok: bundled != null,
+          detail: bundled != null ? '使用内置: $bundled' : '设置里未指定，且未找到内置脚本',
+          fix: bundled != null ? null : '在设置中指定 render_orbat.js 的路径',
+        ));
+      } else {
+        final f = File(script);
+        items.add(CheckItem(
+          name: tr('渲染脚本'),
+          ok: f.existsSync(),
+          detail: script,
+          fix: f.existsSync() ? null : '该路径下找不到文件，请重新指定',
+        ));
+      }
     }
 
     // ---------- 4. API Key ----------
@@ -152,7 +154,7 @@ class SelfCheck {
       detail: key.isEmpty
           ? (keyOptional ? '未配置（当前模式不需要）' : '未配置')
           : AppLogger.keyFingerprint(key),
-      fix: key.isEmpty && !keyOptional ? '在设置里填入 DeepSeek API Key' : null,
+      fix: key.isEmpty && !keyOptional ? '在设置里填入 API Key' : null,
     ));
 
     // ---------- 5. 目录可写 ----------
@@ -178,8 +180,7 @@ class SelfCheck {
       try {
         final d = Directory(target);
         if (!d.existsSync()) d.createSync(recursive: true);
-        final probe =
-            File('${d.path}${Platform.pathSeparator}.write_probe');
+        final probe = File('${d.path}${Platform.pathSeparator}.write_probe');
         probe.writeAsStringSync('ok');
         probe.deleteSync();
         outDetail = tr('产物输出目录可写');
@@ -194,33 +195,39 @@ class SelfCheck {
         fix: outOk ? null : '在设置里更换输出目录，或清理存储空间后重试',
       ));
     } else {
-    var cwdOk = true;
-    String cwdDetail = Directory.current.path;
-    try {
-      final probe = File(
-          '${Directory.current.path}${Platform.pathSeparator}.write_probe');
-      probe.writeAsStringSync('ok');
-      probe.deleteSync();
-    } catch (_) {
-      cwdOk = false;
-      cwdDetail = '${Directory.current.path}（不可写）';
-    }
-    items.add(CheckItem(
-      name: tr('当前目录可写'),
-      ok: cwdOk,
-      detail: cwdDetail,
-      fix: cwdOk ? null : '出图会写到这里，请换一个有写权限的位置',
-    ));
+      var cwdOk = true;
+      String cwdDetail = Directory.current.path;
+      try {
+        final probe = File(
+            '${Directory.current.path}${Platform.pathSeparator}.write_probe');
+        probe.writeAsStringSync('ok');
+        probe.deleteSync();
+      } catch (_) {
+        cwdOk = false;
+        cwdDetail = '${Directory.current.path}（不可写）';
+      }
+      items.add(CheckItem(
+        name: tr('当前目录可写'),
+        ok: cwdOk,
+        detail: cwdDetail,
+        fix: cwdOk ? null : '出图会写到这里，请换一个有写权限的位置',
+      ));
     }
 
     // ---------- 7. 网络（可选，不算失败） ----------
-    final dsOk = await _tcpReachable('api.deepseek.com', 443);
+    final Uri? apiUri = Uri.tryParse((apiBaseUrl ?? '').trim());
+    final String apiHost =
+        (apiUri?.host.isNotEmpty ?? false) ? apiUri!.host : 'api.deepseek.com';
+    final int apiPort = apiUri?.hasPort == true
+        ? apiUri!.port
+        : (apiUri?.scheme == 'http' ? 80 : 443);
+    final dsOk = await _tcpReachable(apiHost, apiPort);
     items.add(CheckItem(
-      name: tr('DeepSeek 接口连通'),
+      name: tr('AI 接口连通'),
       ok: dsOk,
       optional: true,
-      detail: dsOk ? 'api.deepseek.com:443 可达' : '连接超时或被拦截',
-      fix: dsOk ? null : '识图需要联网访问 api.deepseek.com',
+      detail: dsOk ? '$apiHost:$apiPort 可达' : '连接超时或被拦截',
+      fix: dsOk ? null : '识图需要联网访问 $apiHost',
     ));
 
     final saOk = await _tcpReachable('spatialillusions.com', 443);
@@ -239,7 +246,8 @@ class SelfCheck {
     if (smokeRender) {
       items.add(await _smokeRender(
           nodePath: isAndroid ? null : nodePath,
-          script: isAndroid ? null : (script ?? _bundledScript())));
+          script: isAndroid ? null : (script ?? _bundledScript()),
+          androidSmoke: androidSmoke));
     }
 
     for (final i in items) {
@@ -262,11 +270,12 @@ class SelfCheck {
   static Future<CheckItem> _smokeRender({
     required String? nodePath,
     required String? script,
+    Future<CheckItem> Function()? androidSmoke,
   }) async {
     final name = tr('出图冒烟（真渲染一次）');
-    // 安卓端：冒烟走 pipeline 渲染 hook 会弹出 WebView 页面，不适合放在自检里，
-    // 跳过（首次真实出图时自然验证）
+    // 安卓端：由 UI 层用内置样例 JSON + 隐藏 WebView 执行，自检本身不持有 UI。
     if (Platform.isAndroid) {
+      if (androidSmoke != null) return androidSmoke();
       return CheckItem(
         name: name,
         ok: true,

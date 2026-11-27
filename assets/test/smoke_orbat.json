@@ -1,0 +1,38 @@
+{
+  "options": {
+    "sidc": "130310002111000000000000000000",
+    "uniqueDesignation": "Smoke Div",
+    "additionalInformation": "",
+    "dashed": false,
+    "outline": false,
+    "plain-text-mode": false,
+    "showMapLabels": true
+  },
+  "subOrganizations": [
+    {
+      "options": {
+        "sidc": "130310001612110000000000000000",
+        "uniqueDesignation": "1st Bn",
+        "additionalInformation": "",
+        "dashed": false,
+        "outline": false,
+        "plain-text-mode": false,
+        "showMapLabels": true
+      },
+      "subOrganizations": []
+    },
+    {
+      "options": {
+        "sidc": "130310001513030000000000000000",
+        "uniqueDesignation": "Arty Coy",
+        "additionalInformation": "",
+        "dashed": false,
+        "outline": false,
+        "plain-text-mode": false,
+        "showMapLabels": true
+      },
+      "subOrganizations": []
+    }
+  ],
+  "commandLevels": "1"
+}

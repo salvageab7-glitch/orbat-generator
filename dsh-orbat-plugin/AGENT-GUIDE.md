@@ -2,9 +2,19 @@
 
 Use this guide when turning a user-provided order-of-battle image or document into an ORBAT chart. The plugin does not read images: use the current Agent's vision/file capability, then call the ORBAT tools.
 
+> Full contract: `docs/agent-contract/README.md`（0-based SIDC、12/20 注释、修饰位实际行为、commandLevels）and `docs/agent-contract/hq-echelon-table.md`（HQ 用码）。Structure: `schema/orbat.schema.json` (or `orbat-cli.exe schema --out orbat.schema.json`).
+
 Before rendering, users can open **Settings → ORBAT / 设置 → 编制图** to choose a white or transparent PNG background and set or restore the default output directory. SVG output is always transparent. The page's workflow self-check and the `orbat_workflow_self_check` tool run the same Host operation and do not require an API key.
 
 在出图前，用户可以打开 **设置 → 编制图 / Settings → ORBAT**，选择 PNG 白底或透明底，并设置或恢复默认输出目录。SVG 始终为透明背景。页面上的工作流自检和 `orbat_workflow_self_check` 工具调用同一 Host 操作，不需要 API Key。
+
+## Trigger / 触发（Android mode 3）
+
+Default: open the app with mode 3 and storage access; it auto-scans `Download/orbat_inbox`. The `plugin.RUN` intent is optional and requires an ADB/Shizuku-capable host; do not rely on it. First run also asks to open `orbat_core` and grant “All files access” once.
+
+默认：打开 App（模式三 + 存储权限），自动扫描 `Download/orbat_inbox`。`plugin.RUN` 只是可选路径，需要 ADB/Shizuku；首次还会要求打开 `orbat_core` 与“所有文件访问”。
+
+Poll `_status.json` by `runId`; outcomes are in `files[]` and `report.deliverable`. Output files now use `<name>__<runId>.png|svg|...`. On failure/render-not-delivered, read `logTail` or `outbox/<runId>.log.txt` for the app log tail.
 
 ## Workflow / 流程
 
