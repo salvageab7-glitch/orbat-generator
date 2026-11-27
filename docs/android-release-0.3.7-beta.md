@@ -68,3 +68,10 @@ adb install -r "版本\v0.3.7-beta\release\orbat-generator-v0.3.7-beta-android-d
 - debug 签名，不能上架应用商店；
 - 普通 OpenAI 兼容服务的 `/models` 能力元数据不统一；
 - 插件/Android 出图依赖 `spatialillusions.com` 可用。
+
+## 7. 发布记录
+
+- GitHub Release: https://github.com/salvageab7-glitch/orbat-generator/releases/tag/v0.3.7-beta
+- 源码提交: `0582a54`（导出仓库 main）
+- 发布附件: DSH 插件 zip/tgz、Android APK、SHA256SUMS.txt
+- GitHub Release 已标记 prerelease=true（beta）。
