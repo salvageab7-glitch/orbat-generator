@@ -33,7 +33,9 @@
 
 | 附件 | 说明 |
 |---|---|
-| `orbat-agent-v0.3.7-beta-dsh-plugin.zip` | DSH Desktop 插件包，解压后用 Plugin Manager 安装 |
+| `orbat-generator-v0.3.7-beta-full-setup.exe` | Windows 完整版安装器（内置 Node.js，自动检测 VC++） |
+| `orbat-generator-v0.3.7-beta-lite-setup.exe` | Windows 精简版安装器（需自备 Node.js ≥24） |
+| `orbat-agent-v0.3.7-beta-dsh-plugin.zip` | DSH Desktop 插件包，解压后 Plugin Manager 安装 |
 | `orbat-agent-v0.3.7-beta-dsh-plugin.tgz` | DSH 插件 npm 包形式 |
 | `orbat-generator-v0.3.7-beta-android-debug.apk` | Android 侧载测试包（debug 签名） |
 | `SHA256SUMS.txt` | 附件 SHA-256 校验值 |

@@ -7,6 +7,7 @@
 - [`cleanup-2026-11-27.md`](cleanup-2026-11-27.md) — 本次清理记录
 - [`android-release.md`](android-release.md) — Android v0.3.6 侧载 APK 构建/签名/验证记录
 - [`android-release-0.3.7-beta.md`](android-release-0.3.7-beta.md) — Android v0.3.7-beta 构建记录
+- [`windows-release-0.3.7-beta.md`](windows-release-0.3.7-beta.md) — Windows v0.3.7-beta 完整版/精简版安装器记录
 - [`android-device-test-2026-11-27.md`](android-device-test-2026-11-27.md) — Android 真机测试记录
 - [`../dsh-orbat-plugin/CLI-PROTOCOL.md`](../dsh-orbat-plugin/CLI-PROTOCOL.md) — Windows CLI 协议、`logs`/错误报告、退出码
 
